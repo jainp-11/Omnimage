@@ -1,816 +1,1251 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-  <title>Image Studio: DPI | Resize | Target Size | Format Convert</title>
-  <style>
-    * {
-      box-sizing: border-box;
-      font-family: system-ui, 'Segoe UI', 'Inter', 'Poppins', sans-serif;
-    }
+#!/usr/bin/env python3
+"""
+MolAkriti — Optical Chemical Structure Recognition (OCSR) Software
+Outputs Chemsketch-compatible MDL Molfile and SMILES.
+Uses DECIMER for recognition + RDKit for molecule output + OpenCV for preprocessing.
 
-    body {
-      background: linear-gradient(145deg, #f4f7fc 0%, #eef2f6 100%);
-      margin: 0;
-      padding: 2rem 1rem;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-    }
+Capture modes
+-------------
+  * Open Image        – load a file from disk
+  * Crop from File    – interactive crop of the currently loaded image
+  * Screenshot        – Dynacrop‑style live rubber‑band overlay (DPI‑aware)
+  * Lasso Crop        – freehand polygonal selection (click points, double‑click or Enter to finish)
 
-    .card {
-      max-width: 1440px;
-      width: 100%;
-      background: rgba(255,255,255,0.94);
-      backdrop-filter: blur(2px);
-      border-radius: 2.5rem;
-      box-shadow: 0 25px 45px -12px rgba(0,0,0,0.25), 0 2px 8px rgba(0,0,0,0.05);
-      overflow: hidden;
-      padding: 1.8rem 2rem;
-      transition: all 0.2s;
-      border: 1px solid rgba(255,255,255,0.6);
-    }
+All DPI scaling issues resolved – screenshot correctly fills overlay,
+selected region maps to physical pixels, preview updates reliably.
+"""
 
-    h1 {
-      font-size: 1.9rem;
-      font-weight: 700;
-      background: linear-gradient(135deg, #1E2F5E, #2b4c7c);
-      -webkit-background-clip: text;
-      background-clip: text;
-      color: transparent;
-      margin: 0 0 0.3rem 0;
-      letter-spacing: -0.3px;
-    }
+import os
+import sys
+import subprocess
+import argparse
+import tempfile
+import threading
+import traceback
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-    .sub {
-      color: #4a627a;
-      border-left: 4px solid #2b7a62;
-      padding-left: 1rem;
-      margin-bottom: 2rem;
-      font-weight: 500;
-    }
+from rdkit import Chem
+from rdkit.Chem import rdchem  # noqa: F401
 
-    .flex-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 2rem;
-    }
+from DECIMER import predict_SMILES
 
-    .panel {
-      flex: 1.2;
-      min-width: 280px;
-    }
+from PIL import Image, ImageTk, ImageGrab, ImageDraw
+import cv2
 
-    .preview-area {
-      flex: 0.9;
-      min-width: 280px;
-      background: #f8fafd;
-      border-radius: 1.8rem;
-      padding: 1.2rem;
-      box-shadow: inset 0 1px 3px #0001, 0 6px 12px -8px rgba(0,0,0,0.1);
-    }
+DECIMER_AVAILABLE = True
 
-    .img-container {
-      background: #eef2f0;
-      border-radius: 1.2rem;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-      text-align: center;
-    }
 
-    .preview-img {
-      max-width: 100%;
-      max-height: 210px;
-      object-fit: contain;
-      border-radius: 1rem;
-      background: #fff;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    }
+# ---------------------------------------------------------------------------
+# PyInstaller helpers
+# ---------------------------------------------------------------------------
 
-    .info-text {
-      font-size: 0.85rem;
-      color: #2c5a6e;
-      margin-top: 0.6rem;
-    }
+def resource_path(relative_path):
+    try:
+        base = sys._MEIPASS
+    except AttributeError:
+        base = os.path.abspath(".")
+    return os.path.join(base, relative_path)
 
-    label {
-      font-weight: 600;
-      color: #1f3b4c;
-      display: block;
-      margin-bottom: 0.4rem;
-      font-size: 0.85rem;
-      letter-spacing: 0.3px;
-    }
 
-    select, input, button {
-      width: 100%;
-      padding: 0.7rem 0.9rem;
-      border-radius: 1.2rem;
-      border: 1px solid #cbdbe2;
-      background: white;
-      font-size: 0.9rem;
-      transition: 0.2s;
-      margin-bottom: 0.8rem;
-    }
+# ---------------------------------------------------------------------------
+# Image preprocessing (enhanced with adaptive thresholding & NL-Means)
+# ---------------------------------------------------------------------------
 
-    button {
-      background: #1f4b6e;
-      color: white;
-      font-weight: 600;
-      border: none;
-      cursor: pointer;
-      transition: 0.2s;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
+def preprocess_image(image_path, invert=False, threshold=200,
+                     adaptive=False, adaptive_block=11, adaptive_C=2,
+                     denoise_method='median'):
+    """
+    Preprocess an image for DECIMER.
+    
+    Parameters
+    ----------
+    image_path : str
+        Path to input image.
+    invert : bool
+        Invert colours (white on black -> black on white).
+    threshold : int
+        Global binarization threshold (0-255) – used only if adaptive=False.
+    adaptive : bool
+        Use adaptive thresholding (Gaussian) instead of global.
+    adaptive_block : int
+        Block size for adaptive thresholding (odd, >1).
+    adaptive_C : int
+        Constant subtracted from mean.
+    denoise_method : str
+        Either 'median' (fast) or 'nlmeans' (slow, strong).
+    
+    Returns
+    -------
+    str : path to preprocessed temporary PNG file.
+    """
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+    h, w = img.shape
+    if w < 800:
+        scale = 800.0 / w
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_CUBIC)
+    if invert:
+        img = cv2.bitwise_not(img)
 
-    button:hover {
-      background: #0f3b57;
-      transform: scale(0.98);
-    }
+    # Binarization
+    if adaptive:
+        # Ensure block size is odd and at least 3
+        block = adaptive_block if adaptive_block % 2 == 1 else adaptive_block + 1
+        if block < 3:
+            block = 3
+        img = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY, block, adaptive_C)
+    else:
+        _, img = cv2.threshold(img, threshold, 255, cv2.THRESH_BINARY)
 
-    .btn-secondary {
-      background: #3f6b52;
-    }
-    .btn-secondary:hover {
-      background: #2f5440;
-    }
+    # Denoising
+    if denoise_method == 'nlmeans':
+        # fastNlMeansDenoising works on grayscale
+        img = cv2.fastNlMeansDenoising(img, None, h=10,
+                                       templateWindowSize=7,
+                                       searchWindowSize=21)
+    elif denoise_method == 'median':
+        img = cv2.medianBlur(img, 3)
 
-    .mode-button-group {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.6rem;
-      margin-bottom: 1rem;
-    }
-    .mode-btn {
-      flex: 1;
-      background: #e2e8f0;
-      color: #1f3b4c;
-      margin-bottom: 0;
-    }
-    .mode-btn.active {
-      background: #1f4b6e;
-      color: white;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-    }
+    tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+    cv2.imwrite(tmp.name, img)
+    return tmp.name
 
-    .row-2cols {
-      display: flex;
-      gap: 0.8rem;
-    }
-    .row-2cols > div {
-      flex: 1;
-    }
 
-    hr {
-      margin: 1rem 0;
-      border: none;
-      height: 1px;
-      background: linear-gradient(to right, #ccc0, #abc0c0, #ccc0);
-    }
+def recognize_structure(image_path, preprocess_opts=None):
+    if preprocess_opts and preprocess_opts.get('enable', False):
+        proc_path = preprocess_image(
+            image_path,
+            invert=preprocess_opts.get('invert', False),
+            threshold=preprocess_opts.get('threshold', 200),
+            adaptive=preprocess_opts.get('adaptive', False),
+            adaptive_block=preprocess_opts.get('adaptive_block', 11),
+            adaptive_C=preprocess_opts.get('adaptive_C', 2),
+            denoise_method=preprocess_opts.get('denoise_method', 'median'),
+        )
+    else:
+        proc_path = image_path
+    try:
+        smiles = predict_SMILES(proc_path)
+        if not smiles or not smiles.strip():
+            raise ValueError("Empty SMILES returned")
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError("RDKit could not parse SMILES")
+        return mol, proc_path, smiles
+    except Exception as exc:
+        raise RuntimeError(f"Recognition failed: {exc}") from exc
+    finally:
+        if (preprocess_opts and preprocess_opts.get('enable', False)
+                and proc_path != image_path
+                and os.path.exists(proc_path)):
+            os.unlink(proc_path)
 
-    .badge {
-      background: #e9ecef;
-      padding: 0.2rem 0.7rem;
-      border-radius: 30px;
-      font-size: 0.75rem;
-      font-weight: 500;
-      color: #2c5a6e;
-    }
 
-    .warning-note {
-      font-size: 0.75rem;
-      color: #b1624b;
-      background: #fff0e0;
-      border-radius: 1rem;
-      padding: 0.3rem 0.7rem;
-      margin-top: 0.4rem;
-    }
+def write_molfile(mol, output_path):
+    with open(output_path, 'w') as fh:
+        fh.write(Chem.MolToMolBlock(mol))
 
-    .metadata-row {
-      background: #e9f0f5;
-      border-radius: 1rem;
-      padding: 0.5rem 0.8rem;
-      margin-top: 8px;
-      font-size: 0.8rem;
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      gap: 8px;
-    }
 
-    footer {
-      text-align: center;
-      margin-top: 2rem;
-      font-size: 0.75rem;
-      color: #6d8e9f;
-    }
+def write_smiles(smiles, output_path):
+    with open(output_path, 'w') as fh:
+        fh.write(smiles)
 
-    @media (max-width: 780px) {
-      .card { padding: 1.2rem; }
-      .row-2cols { flex-direction: column; gap: 0.2rem; }
-      .mode-button-group { flex-direction: column; }
-    }
-  </style>
-</head>
-<body>
-<div class="card">
-  <h1>🖼️ Omnimage Converter · DPI & Metadata</h1>
-  <div class="sub">Convert · Resize (% or WxH) · OR target file size (auto-quality) – PNG now supports lossy preprocessing</div>
 
-  <div class="flex-grid">
-    <div class="panel">
-      <label>📂 Select Image (JPG, PNG, WebP, GIF, BMP, SVG)</label>
-      <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp,image/svg+xml">
+# ---------------------------------------------------------------------------
+# GUI Application
+# ---------------------------------------------------------------------------
 
-      <label>🎞️ Output format</label>
-      <select id="outputFormat">
-        <option value="image/jpeg">JPEG (lossy, best for size)</option>
-        <option value="image/png">PNG (supports lossy preprocessing for target size)</option>
-        <option value="image/webp">WebP (modern, high compression)</option>
-      </select>
+class OCSRApp:
 
-      <label>⚙️ Operation mode (select one)</label>
-      <div class="mode-button-group" id="modeButtonGroup">
-        <button type="button" data-mode="noresize" class="mode-btn active">📏 No resize</button>
-        <button type="button" data-mode="percent" class="mode-btn">📐 By percentage %</button>
-        <button type="button" data-mode="dimension" class="mode-btn">🖼️ By Width × Height</button>
-        <button type="button" data-mode="targetsize" class="mode-btn">🎯 Target size (auto-quality)</button>
-      </div>
+    def __init__(self, root):
+        self.root = root
+        self.root.title("MolAkriti — Chemical Structure OCR (Chemsketch compatible)")
+        self.root.geometry("670x700")  # increased height for new options
+        self.root.resizable(True, True)
+        self.root.configure(bg='#f0f0f0')
+        self._apply_style()
 
-      <!-- dynamic resize panels (hidden for targetsize mode) -->
-      <div id="resizePanel">
-        <div id="percentPanel" style="display: none;">
-          <label>🔽 Scale percentage (%)</label>
-          <input type="number" id="scalePercent" value="70" step="5" min="10" max="200">
-          <div class="warning-note">* Smaller % = stronger size reduction</div>
-        </div>
-        <div id="dimensionPanel" style="display: none;">
-          <div class="row-2cols">
-            <div><label>Width (px)</label><input type="number" id="targetWidth" placeholder="Auto" step="1" min="8"></div>
-            <div><label>Height (px)</label><input type="number" id="targetHeight" placeholder="Auto" step="1" min="8"></div>
-          </div>
-          <label style="display: flex; gap: 0.5rem; align-items: center;">
-            <input type="checkbox" id="keepAspect" checked> 🔒 Maintain aspect ratio
-          </label>
-        </div>
-        <div id="noResizeText" style="display: block; background: #f0f3f7; border-radius: 1.2rem; padding: 0.5rem; text-align: center; font-size: 0.85rem;">
-          ✅ Original dimensions (no resize)
-        </div>
-      </div>
+        # Image / molecule state
+        self.image_path          = None
+        self.mol_object          = None
+        self.smiles_string       = None
+        self.original_image_path = None
+        self.original_pil_image  = None
+        self.cropped_temp_files  = []
 
-      <hr>
-      <label>⚡ Target file size (auto-quality for JPEG/WebP, lossy color reduction for PNG)</label>
-      <div class="row-2cols">
-        <div style="flex:2"><input type="number" id="targetSizeValue" placeholder="e.g., 150" step="1" min="1"></div>
-        <div style="flex:1">
-          <select id="targetSizeUnit">
-            <option value="KB">KB</option>
-            <option value="MB">MB</option>
-          </select>
-        </div>
-      </div>
-      <div class="badge" id="targetSizeNote">💡 Works for JPEG/WebP (quality) and PNG (color reduction). Only active when "Target size" mode is selected.</div>
+        # External-app path cache
+        self._chemsketch_path = None
+        self._chemdraw_path   = None
 
-      <div class="row-2cols" style="margin-top: 1rem;">
-        <button id="convertBtn">✨ CONVERT & OPTIMIZE ✨</button>
-        <button id="downloadBtn" class="btn-secondary" disabled>💾 Download result</button>
-      </div>
-      <div id="statusMsg" style="font-size: 0.8rem; margin-top: 0.5rem; color: #2f6b47;"></div>
-    </div>
+        # Preprocessing tk variables
+        self.preprocess_var = tk.BooleanVar(value=True)
+        self.invert_var     = tk.BooleanVar(value=False)
+        self.threshold_var  = tk.IntVar(value=200)
+        # NEW: adaptive thresholding and NL-Means
+        self.adaptive_var   = tk.BooleanVar(value=False)
+        self.nlmeans_var    = tk.BooleanVar(value=False)
 
-    <div class="preview-area">
-      <div class="img-container">
-        <div><strong>🖼️ Original preview</strong></div>
-        <img id="originalPreview" class="preview-img" alt="original preview" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='150' viewBox='0 0 200 150'%3E%3Crect width='200' height='150' fill='%23cfdee9'/%3E%3Ctext x='30' y='80' fill='%23364966' font-size='14'%3ENo image loaded%3C/text%3E%3C/svg%3E">
-        <div class="info-text">📁 File size: <span id="originalSize">—</span></div>
-        <div class="metadata-row">
-          <span>📐 Dimensions: <span id="origDimensions">—</span></span>
-          <span>🔍 DPI: <span id="origDPI">—</span></span>
-        </div>
-      </div>
-      <div class="img-container" style="margin-top: 1rem;">
-        <div><strong>✨ Converted preview</strong></div>
-        <img id="convertedPreview" class="preview-img" alt="converted preview" style="background:#fef5e7;">
-        <div class="info-text">📦 Output size: <span id="outputSizeInfo">—</span> &nbsp;|&nbsp; 🎯 Format: <span id="outputFormatLabel">—</span></div>
-        <div id="sizeReductionNote" style="font-size:0.7rem; color:#3c6e5f;"></div>
-      </div>
-    </div>
-  </div>
-  <footer>✔️ Supports JPG, PNG, WebP, GIF, BMP, SVG. Shows DPI. Target size mode: JPEG/WebP use binary search on quality; PNG uses lossy color posterization to meet target size.</footer>
-</div>
+        self._create_widgets()
 
-<script>
-  (function() {
-    // DOM elements
-    const fileInput = document.getElementById('fileInput');
-    const outputFormatSelect = document.getElementById('outputFormat');
-    const scalePercentInput = document.getElementById('scalePercent');
-    const targetWidthInput = document.getElementById('targetWidth');
-    const targetHeightInput = document.getElementById('targetHeight');
-    const keepAspectCheck = document.getElementById('keepAspect');
-    const targetSizeValue = document.getElementById('targetSizeValue');
-    const targetSizeUnit = document.getElementById('targetSizeUnit');
-    const convertBtn = document.getElementById('convertBtn');
-    const downloadBtn = document.getElementById('downloadBtn');
-    const originalPreview = document.getElementById('originalPreview');
-    const convertedPreview = document.getElementById('convertedPreview');
-    const originalSizeSpan = document.getElementById('originalSize');
-    const origDimensionsSpan = document.getElementById('origDimensions');
-    const origDPISpan = document.getElementById('origDPI');
-    const outputSizeInfoSpan = document.getElementById('outputSizeInfo');
-    const outputFormatLabelSpan = document.getElementById('outputFormatLabel');
-    const statusMsgDiv = document.getElementById('statusMsg');
-    const sizeReductionNote = document.getElementById('sizeReductionNote');
-    const targetSizeNote = document.getElementById('targetSizeNote');
+    # ------------------------------------------------------------------
+    # Style
+    # ------------------------------------------------------------------
 
-    const percentPanel = document.getElementById('percentPanel');
-    const dimensionPanel = document.getElementById('dimensionPanel');
-    const noResizeText = document.getElementById('noResizeText');
+    def _apply_style(self):
+        style = ttk.Style()
+        if 'clam' in style.theme_names():
+            style.theme_use('clam')
+        style.configure(
+            "Green.Horizontal.TProgressbar",
+            background='#4CAF50', troughcolor='#E0E0E0',
+            bordercolor='#4CAF50', lightcolor='#4CAF50', darkcolor='#4CAF50',
+        )
 
-    let currentMode = 'noresize';
-    const modeBtns = document.querySelectorAll('.mode-btn');
-    let originalImageFile = null;
-    let originalImgData = null;
-    let originalWidth = 0, originalHeight = 0;
-    let originalDPIInfo = { x: null, y: null, unit: '' };
-    let convertedBlob = null;
-    let currentOutputFormat = 'image/jpeg';
+    # ------------------------------------------------------------------
+    # Widget creation
+    # ------------------------------------------------------------------
 
-    // ------------------------------------------------------------------
-    // DPI extraction (unchanged)
-    async function extractDPIFromFile(file) {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-          const buffer = e.target.result;
-          const uint8 = new Uint8Array(buffer);
-          if (uint8.length > 8) {
-            if (uint8[0] === 0xFF && uint8[1] === 0xD8) {
-              let dpi = parseJPEGDPI(uint8);
-              resolve(dpi);
-              return;
-            }
-            if (uint8[0] === 0x89 && uint8[1] === 0x50 && uint8[2] === 0x4E && uint8[3] === 0x47) {
-              let dpi = parsePNGDPI(uint8);
-              resolve(dpi);
-              return;
-            }
-          }
-          resolve({ x: null, y: null, unit: 'unknown' });
-        };
-        reader.onerror = () => resolve({ x: null, y: null, unit: 'unknown' });
-        reader.readAsArrayBuffer(file.slice(0, 15000));
-      });
-    }
+    def _create_widgets(self):
 
-    function parseJPEGDPI(data) {
-      let idx = 2;
-      let foundDensity = { x: null, y: null, unit: '' };
-      while (idx < data.length - 3) {
-        if (data[idx] === 0xFF) {
-          const marker = data[idx + 1];
-          if (marker === 0xE0) {
-            const length = (data[idx + 2] << 8) | data[idx + 3];
-            if (length >= 14 && idx + length < data.length) {
-              if (data[idx + 4] === 0x4A && data[idx + 5] === 0x46 && data[idx + 6] === 0x49 && data[idx + 7] === 0x46 && data[idx + 8] === 0x00) {
-                const densityUnit = data[idx + 11];
-                const xDensity = (data[idx + 12] << 8) | data[idx + 13];
-                const yDensity = (data[idx + 14] << 8) | data[idx + 15];
-                let unitStr = '';
-                if (densityUnit === 1) unitStr = 'DPI';
-                else if (densityUnit === 2) unitStr = 'DPC';
-                else unitStr = 'aspect';
-                foundDensity = { x: xDensity, y: yDensity, unit: unitStr };
-                break;
-              }
-            }
-            idx += length + 2;
-            continue;
-          } 
-          else if (marker === 0xE1) {
-            const length = (data[idx + 2] << 8) | data[idx + 3];
-            if (idx + length < data.length && length > 8) {
-              if (data[idx + 4] === 0x45 && data[idx + 5] === 0x78 && data[idx + 6] === 0x69 && data[idx + 7] === 0x66 && data[idx + 8] === 0x00 && data[idx + 9] === 0x00) {
-                const exifData = data.slice(idx + 10, idx + length);
-                const exifDPI = parseEXIFforDPI(exifData);
-                if (exifDPI.x && exifDPI.y) {
-                  foundDensity = exifDPI;
-                  break;
+        # Top button row
+        file_frame = ttk.Frame(self.root, padding=5)
+        file_frame.pack(fill=tk.X)
+
+        tk.Button(
+            file_frame, text="Open Image", command=self.open_image,
+            bg='#2196F3', fg='white', font=('Segoe UI', 9, 'bold'),
+            padx=5, pady=2, activebackground='#1976D2',
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            file_frame, text="Crop from File", command=self.crop_image,
+            bg='#9C27B0', fg='white', font=('Segoe UI', 9, 'bold'),
+            padx=5, pady=2, activebackground='#7B1FA2',
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            file_frame, text="Screenshot",
+            command=self.rectangular_screen_capture,
+            bg='#00BCD4', fg='white', font=('Segoe UI', 9, 'bold'),
+            padx=5, pady=2, activebackground='#0097A7',
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            file_frame, text="Lasso Crop",
+            command=self.lasso_screen_capture,
+            bg='#FF5722', fg='white', font=('Segoe UI', 9, 'bold'),
+            padx=5, pady=2, activebackground='#E64A19',
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            file_frame, text="Clear", command=self.clear_all,
+            bg='#FF9800', fg='white', font=('Segoe UI', 9, 'bold'),
+            padx=5, pady=2, activebackground='#F57C00',
+        ).pack(side=tk.LEFT, padx=4)
+
+        self.file_label = ttk.Label(file_frame, text="No file selected",
+                                    foreground="gray")
+        self.file_label.pack(side=tk.LEFT, padx=10)
+
+        # Preview canvas
+        preview_frame = ttk.LabelFrame(self.root, text="Image Preview", padding=5)
+        preview_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.preview_canvas = tk.Canvas(preview_frame, bg='white',
+                                        height=70, highlightthickness=0)
+        self.preview_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Preprocessing options (extended)
+        opt_frame = ttk.LabelFrame(
+            self.root, text="Preprocessing (improves recognition)", padding=5)
+        opt_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Row 0: Enable preprocessing
+        ttk.Checkbutton(opt_frame, text="Enable preprocessing",
+                        variable=self.preprocess_var).grid(
+            row=0, column=0, sticky=tk.W, padx=5, columnspan=3)
+
+        # Row 1: Invert colours
+        ttk.Checkbutton(opt_frame, text="Invert colours",
+                        variable=self.invert_var).grid(
+            row=1, column=0, sticky=tk.W, padx=5, columnspan=3)
+
+        # Row 2: Adaptive thresholding (NEW)
+        ttk.Checkbutton(opt_frame, text="Adaptive thresholding (better for uneven light)",
+                        variable=self.adaptive_var).grid(
+            row=2, column=0, sticky=tk.W, padx=5, columnspan=3)
+
+        # Row 3: Global threshold slider (only if adaptive is off)
+        self.thr_label = ttk.Label(opt_frame, text="Binarization threshold (global):")
+        self.thr_label.grid(row=3, column=0, sticky=tk.W, padx=5)
+        thr_scale = ttk.Scale(opt_frame, from_=50, to=250,
+                              variable=self.threshold_var, orient=tk.HORIZONTAL)
+        thr_scale.grid(row=3, column=1, sticky=tk.W)
+        self.threshold_label = ttk.Label(opt_frame, text="200")
+        self.threshold_label.grid(row=3, column=2, padx=5)
+        thr_scale.configure(
+            command=lambda v: self.threshold_label.config(
+                text=str(int(float(v)))))
+
+        # Row 4: Denoising method choice (NEW)
+        ttk.Label(opt_frame, text="Denoising method:").grid(
+            row=4, column=0, sticky=tk.W, padx=5)
+        self.denoise_var = tk.StringVar(value="median")
+        ttk.Radiobutton(opt_frame, text="Median blur (fast, default)",
+                        variable=self.denoise_var, value="median").grid(
+            row=4, column=1, sticky=tk.W)
+        ttk.Radiobutton(opt_frame, text="Fast NL-Means (stronger, slower)",
+                        variable=self.denoise_var, value="nlmeans").grid(
+            row=4, column=2, sticky=tk.W)
+
+        # Dynamic disabling of global threshold when adaptive is on
+        def on_adaptive_toggle(*args):
+            if self.adaptive_var.get():
+                self.thr_label.config(state=tk.DISABLED)
+                self.threshold_label.config(state=tk.DISABLED)
+                # Also disable the scale widget by referencing it directly
+                thr_scale.config(state=tk.DISABLED)
+            else:
+                self.thr_label.config(state=tk.NORMAL)
+                self.threshold_label.config(state=tk.NORMAL)
+                thr_scale.config(state=tk.NORMAL)
+        self.adaptive_var.trace_add('write', on_adaptive_toggle)
+        on_adaptive_toggle()  # initial state
+
+        # Progress bar (hidden until recognition starts)
+        self.progress_frame = ttk.Frame(self.root)
+        self.progress = ttk.Progressbar(
+            self.progress_frame, mode='indeterminate', length=400,
+            style='Green.Horizontal.TProgressbar')
+        self.progress.pack(pady=5)
+        self.progress_frame.pack_forget()
+
+        # Status label
+        self.status_label = ttk.Label(self.root, text="",
+                                      font=('Segoe UI', 9, 'italic'))
+        self.status_label.pack()
+
+        # Recognise button
+        self.recognize_btn = tk.Button(
+            self.root, text="Recognise Structure", command=self.recognize,
+            bg='#4CAF50', fg='white', font=('Segoe UI', 11, 'bold'),
+            padx=15, pady=5, activebackground='#388E3C')
+        self.recognize_btn.pack(pady=10)
+
+        # Result text area
+        result_frame = ttk.LabelFrame(self.root, text="Recognition Result",
+                                      padding=5)
+        result_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.result_text = tk.Text(
+            result_frame, height=3, wrap=tk.WORD,
+            bg='#f9f9f9', fg='#333', font=('Consolas', 10),
+            state=tk.DISABLED)
+        scroll = ttk.Scrollbar(result_frame, command=self.result_text.yview)
+        self.result_text.configure(yscrollcommand=scroll.set)
+        self.result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Save buttons
+        self.save_btn = tk.Button(
+            self.root, text="Save Molfile...", command=self.save_output,
+            state=tk.DISABLED, bg="#1A0080", fg='white',
+            font=('Segoe UI', 9, 'bold'), padx=10, pady=2,
+            activebackground='#1A0080')
+        self.save_btn.pack(pady=5)
+
+        self.save_smiles_btn = tk.Button(
+            self.root, text="Save SMILES only...", command=self.save_smiles_only,
+            state=tk.DISABLED, bg='#1A0080', fg='white',
+            font=('Segoe UI', 9, 'bold'), padx=10, pady=2,
+            activebackground='#1A0080')
+        self.save_smiles_btn.pack(pady=5)
+
+    # ------------------------------------------------------------------
+    # Window restore helper
+    # ------------------------------------------------------------------
+
+    def _restore_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.update_idletasks()
+
+    # ------------------------------------------------------------------
+    # Crop dialog  (used by "Crop from File" only)
+    # ------------------------------------------------------------------
+
+    def _crop_pil_image(self, pil_img, source_name="image"):
+        """Open an interactive crop dialog for an already-loaded PIL image."""
+        crop_win = tk.Toplevel(self.root)
+        crop_win.title(f"Crop {source_name} — drag to select, double-click to confirm")
+        crop_win.configure(bg='#f0f0f0')
+
+        sw = crop_win.winfo_screenwidth()
+        sh = crop_win.winfo_screenheight()
+        max_w, max_h = int(sw * 0.9), int(sh * 0.9)
+        iw, ih = pil_img.size
+        scale = 1.0
+        if iw > max_w or ih > max_h:
+            scale = min(max_w / iw, max_h / ih)
+            display_img = pil_img.resize(
+                (int(iw * scale), int(ih * scale)), Image.Resampling.LANCZOS)
+        else:
+            display_img = pil_img.copy()
+
+        photo = ImageTk.PhotoImage(display_img)
+        canvas = tk.Canvas(crop_win, width=display_img.width,
+                           height=display_img.height,
+                           cursor="cross", bg='white')
+        canvas.pack(padx=10, pady=10)
+        canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+
+        rect_id = None
+        start_x = start_y = None
+        result_path = [None]
+
+        def on_press(event):
+            nonlocal start_x, start_y, rect_id
+            start_x = canvas.canvasx(event.x)
+            start_y = canvas.canvasy(event.y)
+            if rect_id:
+                canvas.delete(rect_id)
+            rect_id = canvas.create_rectangle(
+                start_x, start_y, start_x, start_y,
+                outline='red', width=2, dash=(4, 2))
+
+        def on_drag(event):
+            if start_x is None or rect_id is None:
+                return
+            canvas.coords(rect_id, start_x, start_y,
+                          canvas.canvasx(event.x), canvas.canvasy(event.y))
+
+        def do_crop(event=None):
+            if rect_id is None:
+                return
+            x1, y1, x2, y2 = canvas.coords(rect_id)
+            if abs(x2 - x1) < 5 or abs(y2 - y1) < 5:
+                messagebox.showwarning(
+                    "Crop", "Selection too small. Draw a larger rectangle.")
+                return
+            left   = max(0,           int(min(x1, x2) / scale))
+            top    = max(0,           int(min(y1, y2) / scale))
+            right  = min(pil_img.width,  int(max(x1, x2) / scale))
+            bottom = min(pil_img.height, int(max(y1, y2) / scale))
+            if left >= right or top >= bottom:
+                messagebox.showerror("Crop", "Invalid crop region.")
+                return
+            cropped = pil_img.crop((left, top, right, bottom))
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            cropped.save(tmp.name, 'PNG')
+            tmp.close()
+            result_path[0] = tmp.name
+            crop_win.destroy()
+
+        def cancel(event=None):
+            crop_win.destroy()
+
+        canvas.bind("<ButtonPress-1>",   on_press)
+        canvas.bind("<B1-Motion>",       on_drag)
+        canvas.bind("<Double-Button-1>", do_crop)
+        crop_win.bind("<Escape>",        cancel)
+
+        tk.Label(
+            crop_win,
+            text="Click and drag to select.  "
+                 "Double-click or press 'Crop' to confirm.",
+            bg='#f0f0f0', font=('Segoe UI', 9),
+        ).pack(pady=(0, 6))
+
+        bf = ttk.Frame(crop_win)
+        bf.pack(pady=5)
+        ttk.Button(bf, text="Crop Selected", command=do_crop).pack(
+            side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel",        command=cancel).pack(
+            side=tk.LEFT, padx=5)
+
+        crop_win.transient(self.root)
+        crop_win.grab_set()
+        self.root.wait_window(crop_win)
+        return result_path[0]
+
+    # ------------------------------------------------------------------
+    # Crop from loaded image
+    # ------------------------------------------------------------------
+
+    def crop_image(self):
+        if not self.original_pil_image:
+            messagebox.showwarning("No Image", "Please open an image first.")
+            return
+        path = self._crop_pil_image(self.original_pil_image,
+                                    source_name="opened image")
+        if path:
+            self.image_path          = path
+            self.original_pil_image  = Image.open(path)
+            self.original_image_path = path
+            self.cropped_temp_files.append(path)
+            self._update_preview()
+            messagebox.showinfo(
+                "Crop Done",
+                "Image cropped. You can now recognise the structure.")
+
+    # ------------------------------------------------------------------
+    # Rectangular Screenshot — full DPI‑aware overlay with closures
+    # ------------------------------------------------------------------
+
+    def rectangular_screen_capture(self):
+        """Minimise -> grab screen -> dark veil overlay -> rubber-band select -> crop -> restore -> auto-recognise."""
+        self.root.update_idletasks()
+        self.root.iconify()
+        self.root.after(500, self._start_rect_capture)
+
+    def _start_rect_capture(self):
+        """Capture primary monitor, build overlay, set up rubber-band selection (DPI‑aware)."""
+        # Capture full screen (primary monitor) – physical pixels
+        full_img = ImageGrab.grab()
+        phys_w, phys_h = full_img.size
+
+        # Logical screen dimensions (DPI‑scaled)
+        log_w = self.root.winfo_screenwidth()
+        log_h = self.root.winfo_screenheight()
+
+        # Scaling factors (physical → logical)
+        scale_x = phys_w / log_w
+        scale_y = phys_h / log_h
+
+        # Resize screenshot to logical size for display
+        display_img = full_img.resize((log_w, log_h), Image.Resampling.LANCZOS)
+
+        # Overlay window
+        overlay = tk.Toplevel()
+        overlay.overrideredirect(True)
+        overlay.withdraw()
+        overlay.attributes('-alpha', 0.72)
+        overlay.attributes('-topmost', True)
+        overlay.configure(bg='black')
+        overlay.geometry(f"{log_w}x{log_h}+0+0")
+        overlay.deiconify()
+        overlay.focus_force()
+        overlay.update_idletasks()
+
+        # Canvas
+        canvas = tk.Canvas(overlay, width=log_w, height=log_h,
+                           highlightthickness=0, cursor='crosshair', bg='black')
+        canvas.place(x=0, y=0)
+        photo = ImageTk.PhotoImage(display_img)
+        canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        canvas.image = photo  # keep reference
+
+        # Instruction banner
+        canvas.create_rectangle(0, 0, log_w, 46, fill='#111111', outline='')
+        canvas.create_text(log_w // 2, 23,
+                           text="Click and drag to select the chemical structure.   "
+                                "Release mouse to capture.   ESC = cancel",
+                           fill='#ffffff', font=('Segoe UI', 12, 'bold'), anchor='center')
+
+        # Rubber-band state (nonlocal inside closures)
+        rect_id = None
+        start_x = None
+        start_y = None
+
+        def on_press(event):
+            nonlocal start_x, start_y, rect_id
+            start_x = event.x
+            start_y = event.y
+            if rect_id:
+                canvas.delete(rect_id)
+            rect_id = canvas.create_rectangle(start_x, start_y, start_x, start_y,
+                                              outline='#FF3333', width=2, dash=(6, 3))
+
+        def on_drag(event):
+            nonlocal rect_id
+            if start_x is not None and rect_id:
+                canvas.coords(rect_id, start_x, start_y, event.x, event.y)
+
+        def on_release(event):
+            nonlocal rect_id, start_x, start_y
+            if start_x is None:
+                return
+
+            # Logical rectangle
+            x1_log = min(start_x, event.x)
+            y1_log = min(start_y, event.y)
+            x2_log = max(start_x, event.x)
+            y2_log = max(start_y, event.y)
+
+            # Map to physical pixels
+            x1_phys = int(x1_log * scale_x)
+            y1_phys = int(y1_log * scale_y)
+            x2_phys = int(x2_log * scale_x)
+            y2_phys = int(y2_log * scale_y)
+
+            # Clamp to physical image bounds
+            x1_phys = max(0, min(x1_phys, phys_w))
+            y1_phys = max(0, min(y1_phys, phys_h))
+            x2_phys = max(0, min(x2_phys, phys_w))
+            y2_phys = max(0, min(y2_phys, phys_h))
+
+            # Destroy overlay immediately
+            overlay.destroy()
+
+            # Check for tiny selection
+            if (x2_phys - x1_phys) < 5 or (y2_phys - y1_phys) < 5:
+                self._restore_window()
+                return
+
+            # Crop from the original full image
+            cropped = full_img.crop((x1_phys, y1_phys, x2_phys, y2_phys))
+            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            cropped.save(tmp.name, 'PNG')
+            tmp.close()
+
+            self._restore_window()
+            self._load_captured_image(tmp.name, label="Rectangular screenshot")
+            self.recognize()
+
+        def on_cancel(event=None):
+            overlay.destroy()
+            self._restore_window()
+
+        canvas.bind('<ButtonPress-1>', on_press)
+        canvas.bind('<B1-Motion>', on_drag)
+        canvas.bind('<ButtonRelease-1>', on_release)
+        overlay.bind('<Escape>', on_cancel)
+
+    # ------------------------------------------------------------------
+    # Lasso Crop (freehand polygonal selection)
+    # ------------------------------------------------------------------
+
+    def lasso_screen_capture(self):
+        """Minimise -> grab screen -> overlay -> freehand lasso selection."""
+        self.root.update_idletasks()
+        self.root.iconify()
+        self.root.after(500, self._start_lasso_capture)
+
+    def _start_lasso_capture(self):
+        """Freehand lasso with white background outside the drawn shape."""
+        print("[Lasso] Starting...")
+        full_img = ImageGrab.grab()
+        phys_w, phys_h = full_img.size
+
+        log_w = self.root.winfo_screenwidth()
+        log_h = self.root.winfo_screenheight()
+
+        scale_x = phys_w / log_w
+        scale_y = phys_h / log_h
+
+        display_img = full_img.resize((log_w, log_h), Image.Resampling.LANCZOS)
+
+        overlay = tk.Toplevel()
+        overlay.overrideredirect(True)
+        overlay.withdraw()
+        overlay.attributes('-alpha', 0.72)
+        overlay.attributes('-topmost', True)
+        overlay.configure(bg='black')
+        overlay.geometry(f"{log_w}x{log_h}+0+0")
+        overlay.deiconify()
+        overlay.focus_force()
+        overlay.update_idletasks()
+
+        canvas = tk.Canvas(overlay, width=log_w, height=log_h,
+                        highlightthickness=0, cursor='crosshair', bg='black')
+        canvas.place(x=0, y=0)
+        photo = ImageTk.PhotoImage(display_img)
+        canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        canvas.image = photo  # keep reference
+
+        # Instruction banner
+        canvas.create_rectangle(0, 0, log_w, 46, fill='#111111', outline='')
+        canvas.create_text(log_w // 2, 23,
+                        text="Press and hold LEFT button, DRAG to draw lasso. Release to crop. ESC = cancel",
+                        fill='white', font=('Segoe UI', 12, 'bold'), anchor='center')
+
+        drawing = False
+        points = []          # logical (x,y) on overlay
+        current_line = None
+
+        def on_press(event):
+            nonlocal drawing, current_line
+            drawing = True
+            points.clear()
+            canvas.delete("lasso")
+            x, y = event.x, event.y
+            points.append((x, y))
+            current_line = canvas.create_line(x, y, x, y, fill='#FF3333', width=3, tags="lasso")
+            print("[Lasso] Pressed at", x, y)
+
+        def on_motion(event):
+            nonlocal current_line
+            if not drawing:
+                return
+            x, y = event.x, event.y
+            points.append((x, y))
+            if current_line:
+                coords = canvas.coords(current_line)
+                new_coords = list(coords) + [x, y]
+                canvas.coords(current_line, *new_coords)
+
+        def on_release(event):
+            nonlocal drawing, current_line
+            print("[Lasso] Released, points:", len(points))
+            if not drawing:
+                overlay.destroy()
+                self._restore_window()
+                return
+            drawing = False
+            on_motion(event)  # add final point
+
+            try:
+                if len(points) < 5:
+                    print("[Lasso] Too few points, aborting")
+                    canvas.create_text(log_w//2, log_h//2,
+                                    text="Lasso too short. Press ESC to cancel.",
+                                    fill='yellow', font=('Segoe UI', 16, 'bold'), tags="lasso")
+                    overlay.after(2000, overlay.destroy)
+                    self._restore_window()
+                    return
+
+                # ---- 1. Bounding box in logical coordinates ----
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                x1_log, x2_log = min(xs), max(xs)
+                y1_log, y2_log = min(ys), max(ys)
+
+                # ---- 2. Map to physical pixels ----
+                x1_phys = max(0, int(x1_log * scale_x))
+                y1_phys = max(0, int(y1_log * scale_y))
+                x2_phys = min(phys_w, int(x2_log * scale_x))
+                y2_phys = min(phys_h, int(y2_log * scale_y))
+
+                if x2_phys - x1_phys < 10 or y2_phys - y1_phys < 10:
+                    print("[Lasso] Bounding box too small")
+                    canvas.create_text(log_w//2, log_h//2,
+                                    text="Selection too small.", fill='yellow', font=('Segoe UI', 16, 'bold'))
+                    overlay.after(2000, overlay.destroy)
+                    self._restore_window()
+                    return
+
+                # ---- 3. Crop rectangle from full image ----
+                cropped_rect = full_img.crop((x1_phys, y1_phys, x2_phys, y2_phys))
+                print(f"[Lasso] Cropped rectangle: {cropped_rect.size}")
+
+                # ---- 4. Transform lasso points to crop coordinates ----
+                poly_phys = [(int(p[0] * scale_x), int(p[1] * scale_y)) for p in points]
+                poly_rel = [(px - x1_phys, py - y1_phys) for (px, py) in poly_phys]
+                # Clip to crop bounds
+                poly_rel = [(max(0, min(x, cropped_rect.width-1)),
+                            max(0, min(y, cropped_rect.height-1))) for (x, y) in poly_rel]
+
+                # ---- 5. Create mask (white inside lasso) ----
+                mask = Image.new('L', cropped_rect.size, 0)
+                ImageDraw.Draw(mask).polygon(poly_rel, outline=1, fill=255)
+
+                # ---- 6. Paste cropped image onto white background using mask ----
+                result = Image.new('RGB', cropped_rect.size, (255, 255, 255))
+                result.paste(cropped_rect, mask=mask)
+
+                # ---- 7. Save temporary file ----
+                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                result.save(tmp.name, 'PNG')
+                tmp.close()
+                print("[Lasso] Saved to", tmp.name)
+
+                # ---- 8. Clean up and proceed ----
+                overlay.destroy()
+                self._restore_window()
+                self._load_captured_image(tmp.name, label="Lasso crop")
+                self.recognize()
+
+            except Exception as e:
+                print("[Lasso] Error in on_release:", e)
+                import traceback
+                traceback.print_exc()
+                overlay.destroy()
+                self._restore_window()
+                messagebox.showerror("Lasso Error", str(e))
+
+        def on_cancel(event=None):
+            print("[Lasso] Cancelled")
+            overlay.destroy()
+            self._restore_window()
+
+        canvas.bind('<ButtonPress-1>', on_press)
+        canvas.bind('<B1-Motion>', on_motion)
+        canvas.bind('<ButtonRelease-1>', on_release)
+        overlay.bind('<Escape>', on_cancel)
+            
+    # ------------------------------------------------------------------
+    # Common helper: register a captured image as the working image
+    # ------------------------------------------------------------------
+
+    def _load_captured_image(self, path, label="Captured image"):
+        # Clean up old temp files
+        for tmp in self.cropped_temp_files:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+        self.cropped_temp_files.clear()
+
+        # Verify the new image
+        try:
+            test_img = Image.open(path)
+            test_img.verify()      # check integrity
+            test_img.close()
+            self.original_pil_image = Image.open(path)
+        except Exception as e:
+            messagebox.showerror("Invalid Image", f"Cannot load captured image:\n{e}")
+            return
+
+        self.image_path = path
+        self.original_image_path = path
+        self.cropped_temp_files.append(path)
+        self._update_preview()
+        self.file_label.config(text=label, foreground="black")
+        self.root.update_idletasks()
+
+    # ------------------------------------------------------------------
+    # Preview
+    # ------------------------------------------------------------------
+
+    def _update_preview(self):
+        if not self.image_path or not os.path.exists(self.image_path):
+            return
+        img = Image.open(self.image_path)
+        img.thumbnail((600, 70))
+        self.preview_img = ImageTk.PhotoImage(img)
+        cw = self.preview_canvas.winfo_width()
+        if cw < 2:
+            cw = 600
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(
+            cw // 2, 35, image=self.preview_img, anchor=tk.CENTER)
+
+    # ------------------------------------------------------------------
+    # Open image from disk
+    # ------------------------------------------------------------------
+
+    def open_image(self):
+        path = filedialog.askopenfilename(
+            title="Select Chemical Structure Image",
+            filetypes=[
+                ("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff"),
+                ("All files",   "*.*"),
+            ])
+        if not path:
+            return
+        self.clear_all()
+        self.original_image_path = path
+        self.original_pil_image  = Image.open(path)
+        self.image_path          = path
+        self.file_label.config(text=os.path.basename(path),
+                               foreground="black")
+        self._update_preview()
+
+    # ------------------------------------------------------------------
+    # Clear all state
+    # ------------------------------------------------------------------
+
+    def clear_all(self):
+        for tmp in self.cropped_temp_files:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+        self.cropped_temp_files.clear()
+        self.original_image_path = None
+        self.original_pil_image  = None
+        self.image_path          = None
+        self.mol_object          = None
+        self.smiles_string       = None
+        self.preview_canvas.delete("all")
+        self.file_label.config(text="No file selected", foreground="gray")
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.config(state=tk.DISABLED)
+        self.save_btn.config(state=tk.DISABLED)
+        self.save_smiles_btn.config(state=tk.DISABLED)
+        self.progress_frame.pack_forget()
+        self.status_label.config(text="")
+        self.recognize_btn.config(state=tk.NORMAL)
+
+    # ------------------------------------------------------------------
+    # Recognition pipeline
+    # ------------------------------------------------------------------
+
+    def recognize(self):
+        if not self.image_path:
+            messagebox.showerror(
+                "Error", "Please open or capture an image first.")
+            return
+        if not DECIMER_AVAILABLE:
+            messagebox.showerror(
+                "DECIMER Missing", "DECIMER not available. Check console.")
+            return
+
+        self.recognize_btn.config(state=tk.DISABLED)
+        self.save_btn.config(state=tk.DISABLED)
+        self.save_smiles_btn.config(state=tk.DISABLED)
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(
+            tk.END,
+            "Processing... please wait "
+            "(first run may take 60-90 seconds).\n")
+        self.result_text.config(state=tk.DISABLED)
+        self.root.update()
+
+        self.progress_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.status_label.config(
+            text="Model loading & recognition in progress...")
+        self.root.update()
+        self.progress.start(10)
+
+        def task():
+            try:
+                # Build preprocessing options (extended)
+                preopts = {
+                    'enable':    self.preprocess_var.get(),
+                    'invert':    self.invert_var.get(),
+                    'threshold': self.threshold_var.get(),
+                    'adaptive':  self.adaptive_var.get(),
+                    'adaptive_block': 11,   # fixed block size, could be made adjustable
+                    'adaptive_C': 2,
+                    'denoise_method': self.denoise_var.get(),
                 }
-              }
-            }
-            idx += length + 2;
-            continue;
-          }
-          else {
-            const skipLen = (data[idx + 2] << 8) | data[idx + 3];
-            if (skipLen > 0) idx += skipLen + 2;
-            else idx += 2;
-          }
-        } else {
-          idx++;
-        }
-        if (idx > data.length - 20) break;
-      }
-      if (!foundDensity.x && !foundDensity.y) return { x: null, y: null, unit: 'unknown' };
-      return foundDensity;
+                mol, _, smiles = recognize_structure(self.image_path, preopts)
+                self.mol_object    = mol
+                self.smiles_string = smiles
+                self.root.after(0, self._recognition_success, smiles)
+            except Exception as exc:
+                traceback.print_exc()
+                self.root.after(0, self._recognition_error, str(exc))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _recognition_success(self, smiles):
+        self.progress.stop()
+        self.progress_frame.pack_forget()
+        self.status_label.config(text="Done.", foreground='#388E3C')
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        if smiles and smiles.strip():
+            self.result_text.insert(
+                tk.END, f"Recognised SMILES:\n{smiles}\n\n")
+            self.result_text.insert(
+                tk.END,
+                "Recognition successful. "
+                "You can now save the Molfile or SMILES.")
+            self.save_btn.config(state=tk.NORMAL)
+            self.save_smiles_btn.config(state=tk.NORMAL)
+        else:
+            self.result_text.insert(
+                tk.END,
+                "Recognition returned an empty SMILES string.\n"
+                "Try enabling preprocessing or using a clearer image.")
+        self.result_text.config(state=tk.DISABLED)
+        self.recognize_btn.config(state=tk.NORMAL)
+        self.root.update_idletasks()
+
+    def _recognition_error(self, error_msg):
+        self.progress.stop()
+        self.progress_frame.pack_forget()
+        self.status_label.config(text="Error.", foreground='red')
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete(1.0, tk.END)
+        self.result_text.insert(tk.END, f"ERROR:\n{error_msg}\n\n")
+        self.result_text.insert(
+            tk.END,
+            "Please check the image format and preprocessing settings.")
+        self.result_text.config(state=tk.DISABLED)
+        self.recognize_btn.config(state=tk.NORMAL)
+        self.save_btn.config(state=tk.DISABLED)
+        self.save_smiles_btn.config(state=tk.DISABLED)
+        messagebox.showerror("Recognition Failed", error_msg)
+
+    # ------------------------------------------------------------------
+    # Save output
+    # ------------------------------------------------------------------
+
+    def save_output(self):
+        if self.mol_object is None:
+            return
+        out_file = filedialog.asksaveasfilename(
+            defaultextension=".mol",
+            filetypes=[("MDL Molfile", "*.mol"), ("All files", "*.*")],
+            title="Save Molfile for Chemsketch")
+        if not out_file:
+            return
+        try:
+            write_molfile(self.mol_object, out_file)
+            smiles_file = os.path.splitext(out_file)[0] + ".smi"
+            write_smiles(self.smiles_string, smiles_file)
+            self.show_save_dialog(out_file, smiles_file)
+        except Exception as exc:
+            messagebox.showerror("Save Error", str(exc))
+
+    def save_smiles_only(self):
+        if self.smiles_string is None:
+            return
+        out_file = filedialog.asksaveasfilename(
+            defaultextension=".smi",
+            filetypes=[("SMILES file", "*.smi"), ("All files", "*.*")],
+            title="Save SMILES file")
+        if out_file:
+            try:
+                write_smiles(self.smiles_string, out_file)
+                messagebox.showinfo("Success",
+                                    f"SMILES saved to:\n{out_file}")
+            except Exception as exc:
+                messagebox.showerror("Save Error", str(exc))
+
+    # ------------------------------------------------------------------
+    # Post-save dialog — open in Chemsketch / ChemDraw
+    # ------------------------------------------------------------------
+
+    def show_save_dialog(self, mol_path, smiles_path):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("File Saved")
+        dialog.geometry("500x320")
+        dialog.resizable(False, False)
+        dialog.configure(bg='#f0f0f0')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth()  - 500) // 2
+        y = (dialog.winfo_screenheight() - 320) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        tk.Label(
+            dialog,
+            text=("After opening the file:\n"
+                  "  In Chemsketch : press Ctrl+A, then click 'Clean Structure'\n"
+                  "  In ChemDraw   : press Ctrl+A, then click 'Clean Up Structure'"),
+            font=("Segoe UI", 10, "bold"),
+            bg='#f0f0f0', justify=tk.LEFT,
+        ).pack(pady=(15, 10))
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+
+        # Chemsketch finder
+        def find_chemsketch():
+            candidates = [
+                r"C:\Program Files\ACD\Chemsketch\Chemsketch.exe",
+                r"C:\Program Files (x86)\ACD\Chemsketch\Chemsketch.exe",
+                r"C:\Program Files\ACD\Chemsketch\ChemSketch.exe",
+                r"C:\Program Files (x86)\ACD\Chemsketch\ChemSketch.exe",
+                r"C:\Program Files\ACD\Chemsketch\Chemsketch64.exe",
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+            for pf in [
+                os.environ.get('ProgramFiles',      r'C:\Program Files'),
+                os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+            ]:
+                acd = os.path.join(pf, "ACD")
+                if os.path.isdir(acd):
+                    for root_dir, _, files in os.walk(acd):
+                        for f in files:
+                            if (f.lower().startswith('chemsketch')
+                                    and f.lower().endswith('.exe')):
+                                return os.path.join(root_dir, f)
+            return None
+
+        # ChemDraw finder
+        def find_chemdraw():
+            candidates = [
+                r"C:\Program Files\ChemDraw\ChemDraw.exe",
+                r"C:\Program Files (x86)\ChemDraw\ChemDraw.exe",
+                r"C:\Program Files\PerkinElmer\ChemDraw\ChemDraw.exe",
+                r"C:\Program Files\ChemOffice\ChemDraw\ChemDraw.exe",
+                r"C:\Program Files (x86)\PerkinElmerInformatics\ChemOffice2016\ChemDraw\ChemDraw.exe",
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+            for pf in [
+                os.environ.get('ProgramFiles',      r'C:\Program Files'),
+                os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+            ]:
+                cd = os.path.join(pf, "ChemDraw")
+                if os.path.isdir(cd):
+                    for root_dir, _, files in os.walk(cd):
+                        if "ChemDraw.exe" in files:
+                            return os.path.join(root_dir, "ChemDraw.exe")
+            return None
+
+        def open_chemsketch():
+            if self._chemsketch_path is None:
+                self._chemsketch_path = find_chemsketch()
+            if self._chemsketch_path and os.path.exists(self._chemsketch_path):
+                try:
+                    subprocess.run([self._chemsketch_path, mol_path],
+                                   check=True)
+                    return
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Open Failed",
+                        f"Could not launch Chemsketch:\n{exc}")
+                    return
+            try:
+                os.startfile(mol_path)
+            except Exception:
+                if messagebox.askyesno("Chemsketch Not Found",
+                                       "Locate Chemsketch.exe manually?"):
+                    fp = filedialog.askopenfilename(
+                        title="Select Chemsketch.exe",
+                        filetypes=[("Executable", "Chemsketch.exe"),
+                                   ("All files", "*.*")])
+                    if fp and os.path.exists(fp):
+                        self._chemsketch_path = fp
+                        try:
+                            subprocess.run([fp, mol_path], check=True)
+                        except Exception as exc:
+                            messagebox.showerror(
+                                "Open Failed",
+                                f"Could not launch Chemsketch:\n{exc}")
+
+        def open_chemdraw():
+            if self._chemdraw_path is None:
+                self._chemdraw_path = find_chemdraw()
+            if self._chemdraw_path and os.path.exists(self._chemdraw_path):
+                try:
+                    subprocess.run([self._chemdraw_path, mol_path],
+                                   check=True)
+                    return
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Open Failed",
+                        f"Could not launch ChemDraw:\n{exc}")
+                    return
+            if messagebox.askyesno("ChemDraw Not Found",
+                                   "Locate ChemDraw.exe manually?"):
+                fp = filedialog.askopenfilename(
+                    title="Select ChemDraw.exe",
+                    filetypes=[("Executable", "ChemDraw.exe"),
+                               ("All files", "*.*")])
+                if fp and os.path.exists(fp):
+                    self._chemdraw_path = fp
+                    try:
+                        subprocess.run([fp, mol_path], check=True)
+                    except Exception as exc:
+                        messagebox.showerror(
+                            "Open Failed",
+                            f"Could not launch ChemDraw:\n{exc}")
+
+        ttk.Button(btn_frame, text="Open in Chemsketch",
+                   command=open_chemsketch).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Open in ChemDraw",
+                   command=open_chemdraw).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Close",
+                   command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(
+            dialog,
+            text=f"Saved:\n{mol_path}\n{smiles_path}",
+            font=("Segoe UI", 8), bg='#f0f0f0', fg='gray',
+        ).pack(pady=(10, 5))
+
+
+# ---------------------------------------------------------------------------
+# Splash screen + entry points
+# ---------------------------------------------------------------------------
+
+def show_splash():
+    splash = tk.Tk()
+    splash.title("MolAkriti")
+    splash.overrideredirect(True)
+    splash.configure(bg='white')
+    w, h = 400, 380
+    x = (splash.winfo_screenwidth()  - w) // 2
+    y = (splash.winfo_screenheight() - h) // 2
+    splash.geometry(f"{w}x{h}+{x}+{y}")
+
+    img = None
+    img_path = resource_path("ramnik.png")
+    if os.path.exists(img_path):
+        try:
+            img = tk.PhotoImage(file=img_path)
+            max_px = 150
+            if img.width() > max_px or img.height() > max_px:
+                ratio = min(max_px / img.width(), max_px / img.height())
+                sx = max(1, img.width()  // max(1, int(img.width()  * ratio)))
+                sy = max(1, img.height() // max(1, int(img.height() * ratio)))
+                img = img.subsample(sx, sy)
+        except Exception:
+            img = None
+
+    mf = ttk.Frame(splash, padding=20)
+    mf.pack(fill=tk.BOTH, expand=True)
+    if img:
+        lbl = ttk.Label(mf, image=img, background='white')
+        lbl.pack(pady=(0, 10))
+        splash.image = img   # prevent GC
+    ttk.Label(
+        mf, text="MolAkriti - Chemical Structure OCR",
+        font=("Arial", 14, "bold"), background='white',
+    ).pack(pady=(0, 10))
+    tk.Label(
+        mf, text="Designed by Dr. Ramnik Sharma",
+        font=("Arial", 10, "italic"), fg="#FF051E", bg="white",
+    ).pack(pady=(0, 5))
+    splash.after(5000, lambda: [splash.destroy(), launch_main_app()])
+    splash.mainloop()
+
+
+def launch_main_app():
+    root = tk.Tk()
+    OCSRApp(root)
+    root.mainloop()
+
+
+def main_cli():
+    parser = argparse.ArgumentParser(
+        description="MolAkriti CLI: convert a chemical structure image to "
+                    "Molfile/SMILES")
+    parser.add_argument("--input",      "-i", required=True,
+                        help="Input image file")
+    parser.add_argument("--output",     "-o", required=True,
+                        help="Output .mol file path")
+    parser.add_argument("--preprocess", action="store_true",
+                        help="Enable preprocessing")
+    parser.add_argument("--invert",     action="store_true",
+                        help="Invert colours")
+    parser.add_argument("--threshold",  type=int, default=200,
+                        help="Binarization threshold (0-255) (ignored if --adaptive)")
+    parser.add_argument("--adaptive",   action="store_true",
+                        help="Use adaptive thresholding (better for uneven light)")
+    parser.add_argument("--nlmeans",    action="store_true",
+                        help="Use Fast NL-Means denoising instead of median blur")
+    args = parser.parse_args()
+
+    preopts = {
+        'enable':    args.preprocess,
+        'invert':    args.invert,
+        'threshold': args.threshold,
+        'adaptive':  args.adaptive,
+        'adaptive_block': 11,
+        'adaptive_C': 2,
+        'denoise_method': 'nlmeans' if args.nlmeans else 'median',
     }
+    try:
+        mol, _, smiles = recognize_structure(args.input, preopts)
+        write_molfile(mol, args.output)
+        smiles_out = os.path.splitext(args.output)[0] + ".smi"
+        write_smiles(smiles, smiles_out)
+        print(f"Success!  Molfile -> {args.output}")
+        print(f"          SMILES  -> {smiles_out}")
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
 
-    function parseEXIFforDPI(exifSegment) {
-      try {
-        let littleEndian = true;
-        if (exifSegment[0] === 0x49 && exifSegment[1] === 0x49) littleEndian = true;
-        else if (exifSegment[0] === 0x4D && exifSegment[1] === 0x4D) littleEndian = false;
-        else return { x: null, y: null, unit: '' };
-        
-        const getUint16 = (offset) => littleEndian ? (exifSegment[offset] | (exifSegment[offset+1] << 8)) : ((exifSegment[offset] << 8) | exifSegment[offset+1]);
-        const getUint32 = (offset) => {
-          if (littleEndian) return exifSegment[offset] | (exifSegment[offset+1] << 8) | (exifSegment[offset+2] << 16) | (exifSegment[offset+3] << 24);
-          return (exifSegment[offset] << 24) | (exifSegment[offset+1] << 16) | (exifSegment[offset+2] << 8) | exifSegment[offset+3];
-        };
-        
-        let ifdOffset = getUint32(4);
-        if (ifdOffset + 2 > exifSegment.length) return {};
-        let numEntries = getUint16(ifdOffset);
-        let entryOffset = ifdOffset + 2;
-        let xres = null, yres = null;
-        for (let i = 0; i < numEntries; i++) {
-          let tag = getUint16(entryOffset + i*12);
-          if (tag === 0x011A) {
-            let valueOffset = getUint32(entryOffset + i*12 + 8);
-            if (valueOffset + 8 <= exifSegment.length) {
-              let num = getUint32(valueOffset);
-              let denom = getUint32(valueOffset + 4);
-              if (denom !== 0) xres = num / denom;
-            }
-          }
-          if (tag === 0x011B) {
-            let valueOffset = getUint32(entryOffset + i*12 + 8);
-            if (valueOffset + 8 <= exifSegment.length) {
-              let num = getUint32(valueOffset);
-              let denom = getUint32(valueOffset + 4);
-              if (denom !== 0) yres = num / denom;
-            }
-          }
-        }
-        if (xres && yres) return { x: Math.round(xres), y: Math.round(yres), unit: 'DPI' };
-      } catch(e) {}
-      return { x: null, y: null, unit: '' };
-    }
 
-    function parsePNGDPI(data) {
-      let idx = 8;
-      while (idx + 12 <= data.length) {
-        const chunkLen = (data[idx] << 24) | (data[idx+1] << 16) | (data[idx+2] << 8) | data[idx+3];
-        const chunkType = String.fromCharCode(data[idx+4], data[idx+5], data[idx+6], data[idx+7]);
-        if (chunkType === 'pHYs') {
-          if (chunkLen >= 9) {
-            const ppuX = (data[idx+8] << 24) | (data[idx+9] << 16) | (data[idx+10] << 8) | data[idx+11];
-            const ppuY = (data[idx+12] << 24) | (data[idx+13] << 16) | (data[idx+14] << 8) | data[idx+15];
-            const unitSpec = data[idx+16];
-            if (unitSpec === 1 && ppuX > 0 && ppuY > 0) {
-              let dpiX = Math.round(ppuX * 0.0254);
-              let dpiY = Math.round(ppuY * 0.0254);
-              return { x: dpiX, y: dpiY, unit: 'DPI' };
-            } else if (ppuX === ppuY && ppuX > 0) {
-              return { x: Math.round(ppuX * 0.0254), y: Math.round(ppuY * 0.0254), unit: 'DPI (est)' };
-            }
-          }
-          break;
-        }
-        idx += 12 + chunkLen;
-        if (idx >= data.length - 4) break;
-      }
-      return { x: null, y: null, unit: 'unknown' };
-    }
-
-    function formatDPI(dpiObj) {
-      if (dpiObj.x && dpiObj.y) {
-        if (dpiObj.x === dpiObj.y) return `${dpiObj.x} ${dpiObj.unit || 'DPI'}`;
-        else return `${dpiObj.x} x ${dpiObj.y} ${dpiObj.unit || 'DPI'}`;
-      }
-      return '❓ Not embedded';
-    }
-
-    function formatBytes(bytes, decimals = 2) {
-      if (bytes === 0) return '0 Bytes';
-      const k = 1024;
-      const dm = decimals < 0 ? 0 : decimals;
-      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-    }
-
-    // Mode switching
-    function setMode(mode) {
-      currentMode = mode;
-      modeBtns.forEach(btn => {
-        if (btn.getAttribute('data-mode') === mode) btn.classList.add('active');
-        else btn.classList.remove('active');
-      });
-      percentPanel.style.display = 'none';
-      dimensionPanel.style.display = 'none';
-      noResizeText.style.display = 'none';
-      if (mode === 'percent') percentPanel.style.display = 'block';
-      else if (mode === 'dimension') dimensionPanel.style.display = 'block';
-      else if (mode === 'noresize') noResizeText.style.display = 'block';
-      else if (mode === 'targetsize') {
-        targetSizeNote.innerText = '🎯 Target size mode ACTIVE: JPEG/WebP = quality adjusted; PNG = lossy color reduction (posterization) to meet target.';
-      }
-      if (mode !== 'targetsize') {
-        targetSizeNote.innerText = '💡 Target size is IGNORED in this mode. Switch to "Target size (auto-quality)" to use it.';
-      }
-    }
-
-    modeBtns.forEach(btn => {
-      btn.addEventListener('click', () => setMode(btn.getAttribute('data-mode')));
-    });
-
-    function updateDimensionFromWidth() {
-      if (keepAspectCheck.checked && originalWidth && originalHeight && currentMode === 'dimension') {
-        let w = parseInt(targetWidthInput.value);
-        if (!isNaN(w) && w > 0) {
-          let newH = Math.round(w * (originalHeight / originalWidth));
-          targetHeightInput.value = newH;
-        }
-      }
-    }
-    targetWidthInput.addEventListener('input', updateDimensionFromWidth);
-
-    async function loadImageWithMetadata(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const img = new Image();
-          img.onload = async () => {
-            originalWidth = img.width;
-            originalHeight = img.height;
-            originalImgData = img;
-            originalPreview.src = e.target.result;
-            originalSizeSpan.textContent = formatBytes(file.size);
-            origDimensionsSpan.textContent = `${originalWidth} × ${originalHeight} px`;
-            const dpiData = await extractDPIFromFile(file);
-            originalDPIInfo = dpiData;
-            origDPISpan.textContent = formatDPI(dpiData);
-            originalImageFile = file;
-            if (!targetWidthInput.value) targetWidthInput.value = originalWidth;
-            if (!targetHeightInput.value) targetHeightInput.value = originalHeight;
-            resolve(img);
-          };
-          img.onerror = reject;
-          img.src = e.target.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
-    function computeResizedDimensions(imgW, imgH) {
-      if (currentMode === 'noresize') return { width: imgW, height: imgH };
-      if (currentMode === 'percent') {
-        let percent = parseFloat(scalePercentInput.value);
-        if (isNaN(percent)) percent = 100;
-        percent = Math.min(Math.max(percent, 10), 300);
-        return { width: Math.max(1, Math.round(imgW * percent / 100)), height: Math.max(1, Math.round(imgH * percent / 100)) };
-      }
-      if (currentMode === 'dimension') {
-        let targetW = parseInt(targetWidthInput.value, 10);
-        let targetH = parseInt(targetHeightInput.value, 10);
-        let keepAspect = keepAspectCheck.checked;
-        if (isNaN(targetW) && isNaN(targetH)) return { width: imgW, height: imgH };
-        if (keepAspect) {
-          if (!isNaN(targetW) && targetW > 0) {
-            let ratio = imgH / imgW;
-            return { width: targetW, height: Math.max(1, Math.round(targetW * ratio)) };
-          } else if (!isNaN(targetH) && targetH > 0) {
-            let ratio = imgW / imgH;
-            return { width: Math.max(1, Math.round(targetH * ratio)), height: targetH };
-          }
-        }
-        let finalW = (!isNaN(targetW) && targetW > 0) ? targetW : imgW;
-        let finalH = (!isNaN(targetH) && targetH > 0) ? targetH : imgH;
-        return { width: Math.max(1, finalW), height: Math.max(1, finalH) };
-      }
-      return { width: imgW, height: imgH };
-    }
-
-    // Lossy PNG compression: posterization (reduce bits per channel) to shrink file size
-    async function compressPNGToTarget(canvas, targetBytes) {
-      return new Promise(async (resolve) => {
-        // Try full quality first
-        let fullBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-        if (fullBlob.size <= targetBytes) {
-          resolve(fullBlob);
-          return;
-        }
-        
-        // Try reducing color depth: bits per channel from 8 down to 2
-        const bitsLevels = [6, 5, 4, 3, 2]; // 8 -> 6 -> 5 -> 4 -> 3 -> 2 bits
-        let bestBlob = fullBlob;
-        let bestSize = fullBlob.size;
-        
-        const width = canvas.width;
-        const height = canvas.height;
-        const ctx = canvas.getContext('2d');
-        const originalImageData = ctx.getImageData(0, 0, width, height);
-        
-        for (let bits of bitsLevels) {
-          const steps = Math.pow(2, bits);
-          const step = 256 / steps;
-          // Create a new ImageData with quantized colors
-          const newData = new ImageData(width, height);
-          const srcPixels = originalImageData.data;
-          const dstPixels = newData.data;
-          for (let i = 0; i < srcPixels.length; i += 4) {
-            dstPixels[i] = Math.floor(srcPixels[i] / step) * step;     // R
-            dstPixels[i+1] = Math.floor(srcPixels[i+1] / step) * step; // G
-            dstPixels[i+2] = Math.floor(srcPixels[i+2] / step) * step; // B
-            dstPixels[i+3] = srcPixels[i+3]; // keep alpha
-          }
-          // Put quantized image on canvas
-          ctx.putImageData(newData, 0, 0);
-          const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-          if (blob.size < bestSize) {
-            bestBlob = blob;
-            bestSize = blob.size;
-          }
-          if (bestSize <= targetBytes) break;
-        }
-        
-        // Restore original canvas? Not needed because we recreate canvas each conversion.
-        // But we modified canvas, so we should restore original content for further attempts? Not needed because we use a fresh canvas each convert call.
-        resolve(bestBlob);
-      });
-    }
-
-    async function getBlobWithTargetSize(canvas, mimeType, targetBytes) {
-      if (mimeType === 'image/jpeg' || mimeType === 'image/webp') {
-        return new Promise((resolve) => {
-          const tryQuality = (quality) => new Promise(res => canvas.toBlob(res, mimeType, quality));
-          const minQuality = 0.05;
-          let bestBlob = null;
-          let bestSize = Infinity;
-
-          const updateBest = (blob) => {
-            if (blob && blob.size < bestSize) {
-              bestBlob = blob;
-              bestSize = blob.size;
-            }
-          };
-
-          (async () => {
-            let lowBlob = await tryQuality(minQuality);
-            updateBest(lowBlob);
-            if (lowBlob && lowBlob.size <= targetBytes) {
-              resolve(lowBlob);
-              return;
-            }
-
-            let lowQ = minQuality, highQ = 0.98;
-            for (let i = 0; i < 14; i++) {
-              let mid = (lowQ + highQ) / 2;
-              let blob = await tryQuality(mid);
-              updateBest(blob);
-              if (blob.size <= targetBytes) lowQ = mid;
-              else highQ = mid;
-              if (highQ - lowQ < 0.02) break;
-            }
-            if (bestBlob) {
-              if (bestBlob.size > targetBytes) {
-                statusMsgDiv.innerHTML += ` ⚠️ Even lowest quality (${Math.round(minQuality*100)}%) gives ${formatBytes(bestBlob.size)} > target. Consider resizing first.`;
-              }
-              resolve(bestBlob);
-            } else {
-              resolve(await tryQuality(minQuality));
-            }
-          })();
-        });
-      } 
-      else if (mimeType === 'image/png') {
-        // Use lossy PNG preprocessing
-        return await compressPNGToTarget(canvas, targetBytes);
-      }
-      else {
-        // fallback for other formats
-        return new Promise(res => canvas.toBlob(res, mimeType));
-      }
-    }
-
-    async function convertImage() {
-      if (!originalImgData) {
-        statusMsgDiv.innerText = '⚠️ Please select an image first.';
-        return;
-      }
-      statusMsgDiv.innerText = '⏳ Processing image...';
-      downloadBtn.disabled = true;
-      
-      try {
-        const img = originalImgData;
-        const mimeType = outputFormatSelect.value;
-        currentOutputFormat = mimeType;
-        outputFormatLabelSpan.textContent = mimeType.split('/')[1].toUpperCase();
-        
-        const isTargetSizeMode = (currentMode === 'targetsize');
-        let targetW, targetH;
-        let useTargetSize = false;
-        let targetBytes = null;
-
-        if (isTargetSizeMode) {
-          targetW = img.width;
-          targetH = img.height;
-          let targetSizeRaw = parseFloat(targetSizeValue.value);
-          if (!isNaN(targetSizeRaw) && targetSizeRaw > 0) {
-            const unit = targetSizeUnit.value;
-            targetBytes = unit === 'KB' ? targetSizeRaw * 1024 : targetSizeRaw * 1024 * 1024;
-            useTargetSize = true;
-          } else {
-            statusMsgDiv.innerText = '⚠️ Target size mode active but no valid size entered. Using default quality.';
-          }
-        } else {
-          let dims = computeResizedDimensions(img.width, img.height);
-          targetW = dims.width;
-          targetH = dims.height;
-        }
-
-        targetW = Math.floor(Math.max(1, targetW));
-        targetH = Math.floor(Math.max(1, targetH));
-        
-        const canvas = document.createElement('canvas');
-        canvas.width = targetW;
-        canvas.height = targetH;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, targetW, targetH);
-        
-        let outputBlob;
-        if (useTargetSize) {
-          statusMsgDiv.innerText = `🎯 Targeting ≤ ${formatBytes(targetBytes)} ...`;
-          outputBlob = await getBlobWithTargetSize(canvas, mimeType, targetBytes);
-          let success = outputBlob.size <= targetBytes;
-          let method = (mimeType === 'image/png') ? ' (lossy color reduction)' : ' (quality adjustment)';
-          statusMsgDiv.innerHTML = `🎯 Target ${formatBytes(targetBytes)} → final ${formatBytes(outputBlob.size)}${method} ${success ? '✅' : '❌ Target not reached, try resizing first.'}`;
-        } else {
-          // high quality default for resize modes
-          if (mimeType === 'image/jpeg') outputBlob = await new Promise(res => canvas.toBlob(res, mimeType, 0.92));
-          else if (mimeType === 'image/webp') outputBlob = await new Promise(res => canvas.toBlob(res, mimeType, 0.9));
-          else outputBlob = await new Promise(res => canvas.toBlob(res, mimeType));
-          statusMsgDiv.innerHTML = isTargetSizeMode ? '✅ Conversion done (target not used because no size entered).' : '✅ Conversion done (resize mode, high quality).';
-        }
-        
-        convertedBlob = outputBlob;
-        const outputURL = URL.createObjectURL(outputBlob);
-        convertedPreview.src = outputURL;
-        convertedPreview.onload = () => URL.revokeObjectURL(outputURL);
-        outputSizeInfoSpan.textContent = formatBytes(outputBlob.size);
-        
-        if (originalImageFile) {
-          let diffPercent = ((originalImageFile.size - outputBlob.size) / originalImageFile.size * 100).toFixed(1);
-          if (outputBlob.size < originalImageFile.size) sizeReductionNote.innerText = `📉 ${diffPercent}% smaller than original`;
-          else sizeReductionNote.innerText = `📈 Size increase vs original (format/resize)`;
-        }
-        downloadBtn.disabled = false;
-      } catch (err) {
-        statusMsgDiv.innerText = '❌ Error: ' + err.message;
-        console.error(err);
-      }
-    }
-    
-    downloadBtn.addEventListener('click', () => {
-      if (!convertedBlob) return;
-      let ext = currentOutputFormat === 'image/jpeg' ? 'jpg' : (currentOutputFormat === 'image/png' ? 'png' : 'webp');
-      const link = document.createElement('a');
-      const url = URL.createObjectURL(convertedBlob);
-      link.href = url;
-      link.download = `converted.${ext}`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    });
-    
-    fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      try {
-        await loadImageWithMetadata(file);
-        statusMsgDiv.innerHTML = '✅ Image loaded. DPI & metadata shown. Choose mode and convert.';
-        convertedBlob = null;
-        downloadBtn.disabled = true;
-        sizeReductionNote.innerText = '';
-        outputSizeInfoSpan.textContent = '—';
-        convertedPreview.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="150"%3E%3Crect width="200" height="150" fill="%23eef2f5"/%3E%3Ctext x="30" y="80" fill="%23899"%3Eready to convert%3C/text%3E%3C/svg%3E';
-      } catch(err) {
-        statusMsgDiv.innerText = 'Error loading image';
-      }
-    });
-    
-    convertBtn.addEventListener('click', convertImage);
-    setMode('noresize');
-  })();
-</script>
-</body>
-</html>
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        main_cli()
+    else:
+        show_splash()
