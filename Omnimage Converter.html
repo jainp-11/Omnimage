@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>Image Studio: DPI | Resize | Target Size | Format Convert</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: system-ui, 'Segoe UI', 'Inter', 'Poppins', sans-serif;
+    }
+
+    body {
+      background: linear-gradient(145deg, #f4f7fc 0%, #eef2f6 100%);
+      margin: 0;
+      padding: 2rem 1rem;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .card {
+      max-width: 1440px;
+      width: 100%;
+      background: rgba(255,255,255,0.94);
+      backdrop-filter: blur(2px);
+      border-radius: 2.5rem;
+      box-shadow: 0 25px 45px -12px rgba(0,0,0,0.25), 0 2px 8px rgba(0,0,0,0.05);
+      overflow: hidden;
+      padding: 1.8rem 2rem;
+      transition: all 0.2s;
+      border: 1px solid rgba(255,255,255,0.6);
+    }
+
+    h1 {
+      font-size: 1.9rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #1E2F5E, #2b4c7c);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      margin: 0 0 0.3rem 0;
+      letter-spacing: -0.3px;
+    }
+
+    .sub {
+      color: #4a627a;
+      border-left: 4px solid #2b7a62;
+      padding-left: 1rem;
+      margin-bottom: 2rem;
+      font-weight: 500;
+    }
+
+    .flex-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2rem;
+    }
+
+    .panel {
+      flex: 1.2;
+      min-width: 280px;
+    }
+
+    .preview-area {
+      flex: 0.9;
+      min-width: 280px;
+      background: #f8fafd;
+      border-radius: 1.8rem;
+      padding: 1.2rem;
+      box-shadow: inset 0 1px 3px #0001, 0 6px 12px -8px rgba(0,0,0,0.1);
+    }
+
+    .img-container {
+      background: #eef2f0;
+      border-radius: 1.2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    .preview-img {
+      max-width: 100%;
+      max-height: 210px;
+      object-fit: contain;
+      border-radius: 1rem;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .info-text {
+      font-size: 0.85rem;
+      color: #2c5a6e;
+      margin-top: 0.6rem;
+    }
+
+    label {
+      font-weight: 600;
+      color: #1f3b4c;
+      display: block;
+      margin-bottom: 0.4rem;
+      font-size: 0.85rem;
+      letter-spacing: 0.3px;
+    }
+
+    select, input, button {
+      width: 100%;
+      padding: 0.7rem 0.9rem;
+      border-radius: 1.2rem;
+      border: 1px solid #cbdbe2;
+      background: white;
+      font-size: 0.9rem;
+      transition: 0.2s;
+      margin-bottom: 0.8rem;
+    }
+
+    button {
+      background: #1f4b6e;
+      color: white;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      transition: 0.2s;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+
+    button:hover {
+      background: #0f3b57;
+      transform: scale(0.98);
+    }
+
+    .btn-secondary {
+      background: #3f6b52;
+    }
+    .btn-secondary:hover {
+      background: #2f5440;
+    }
+
+    .mode-button-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-bottom: 1rem;
+    }
+    .mode-btn {
+      flex: 1;
+      background: #e2e8f0;
+      color: #1f3b4c;
+      margin-bottom: 0;
+    }
+    .mode-btn.active {
+      background: #1f4b6e;
+      color: white;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    .row-2cols {
+      display: flex;
+      gap: 0.8rem;
+    }
+    .row-2cols > div {
+      flex: 1;
+    }
+
+    hr {
+      margin: 1rem 0;
+      border: none;
+      height: 1px;
+      background: linear-gradient(to right, #ccc0, #abc0c0, #ccc0);
+    }
+
+    .badge {
+      background: #e9ecef;
+      padding: 0.2rem 0.7rem;
+      border-radius: 30px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: #2c5a6e;
+    }
+
+    .warning-note {
+      font-size: 0.75rem;
+      color: #b1624b;
+      background: #fff0e0;
+      border-radius: 1rem;
+      padding: 0.3rem 0.7rem;
+      margin-top: 0.4rem;
+    }
+
+    .metadata-row {
+      background: #e9f0f5;
+      border-radius: 1rem;
+      padding: 0.5rem 0.8rem;
+      margin-top: 8px;
+      font-size: 0.8rem;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: #6d8e9f;
+    }
+
+    @media (max-width: 780px) {
+      .card { padding: 1.2rem; }
+      .row-2cols { flex-direction: column; gap: 0.2rem; }
+      .mode-button-group { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>🖼️ Omnimage Converter · DPI & Metadata</h1>
+  <div class="sub">Convert · Resize (% or WxH) · OR target file size (auto-quality) – PNG now supports lossy preprocessing</div>
+
+  <div class="flex-grid">
+    <div class="panel">
+      <label>📂 Select Image (JPG, PNG, WebP, GIF, BMP, SVG)</label>
+      <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp,image/svg+xml">
+
+      <label>🎞️ Output format</label>
+      <select id="outputFormat">
+        <option value="image/jpeg">JPEG (lossy, best for size)</option>
+        <option value="image/png">PNG (supports lossy preprocessing for target size)</option>
+        <option value="image/webp">WebP (modern, high compression)</option>
+      </select>
+
+      <label>⚙️ Operation mode (select one)</label>
+      <div class="mode-button-group" id="modeButtonGroup">
+        <button type="button" data-mode="noresize" class="mode-btn active">📏 No resize</button>
+        <button type="button" data-mode="percent" class="mode-btn">📐 By percentage %</button>
+        <button type="button" data-mode="dimension" class="mode-btn">🖼️ By Width × Height</button>
+        <button type="button" data-mode="targetsize" class="mode-btn">🎯 Target size (auto-quality)</button>
+      </div>
+
+      <!-- dynamic resize panels (hidden for targetsize mode) -->
+      <div id="resizePanel">
+        <div id="percentPanel" style="display: none;">
+          <label>🔽 Scale percentage (%)</label>
+          <input type="number" id="scalePercent" value="70" step="5" min="10" max="200">
+          <div class="warning-note">* Smaller % = stronger size reduction</div>
+        </div>
+        <div id="dimensionPanel" style="display: none;">
+          <div class="row-2cols">
+            <div><label>Width (px)</label><input type="number" id="targetWidth" placeholder="Auto" step="1" min="8"></div>
+            <div><label>Height (px)</label><input type="number" id="targetHeight" placeholder="Auto" step="1" min="8"></div>
+          </div>
+          <label style="display: flex; gap: 0.5rem; align-items: center;">
+            <input type="checkbox" id="keepAspect" checked> 🔒 Maintain aspect ratio
+          </label>
+        </div>
+        <div id="noResizeText" style="display: block; background: #f0f3f7; border-radius: 1.2rem; padding: 0.5rem; text-align: center; font-size: 0.85rem;">
+          ✅ Original dimensions (no resize)
+        </div>
+      </div>
+
+      <hr>
+      <label>⚡ Target file size (auto-quality for JPEG/WebP, lossy color reduction for PNG)</label>
+      <div class="row-2cols">
+        <div style="flex:2"><input type="number" id="targetSizeValue" placeholder="e.g., 150" step="1" min="1"></div>
+        <div style="flex:1">
+          <select id="targetSizeUnit">
+            <option value="KB">KB</option>
+            <option value="MB">MB</option>
+          </select>
+        </div>
+      </div>
+      <div class="badge" id="targetSizeNote">💡 Works for JPEG/WebP (quality) and PNG (color reduction). Only active when "Target size" mode is selected.</div>
+
+      <div class="row-2cols" style="margin-top: 1rem;">
+        <button id="convertBtn">✨ CONVERT & OPTIMIZE ✨</button>
+        <button id="downloadBtn" class="btn-secondary" disabled>💾 Download result</button>
+      </div>
+      <div id="statusMsg" style="font-size: 0.8rem; margin-top: 0.5rem; color: #2f6b47;"></div>
+    </div>
+
+    <div class="preview-area">
+      <div class="img-container">
+        <div><strong>🖼️ Original preview</strong></div>
+        <img id="originalPreview" class="preview-img" alt="original preview" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='150' viewBox='0 0 200 150'%3E%3Crect width='200' height='150' fill='%23cfdee9'/%3E%3Ctext x='30' y='80' fill='%23364966' font-size='14'%3ENo image loaded%3C/text%3E%3C/svg%3E">
+        <div class="info-text">📁 File size: <span id="originalSize">—</span></div>
+        <div class="metadata-row">
+          <span>📐 Dimensions: <span id="origDimensions">—</span></span>
+          <span>🔍 DPI: <span id="origDPI">—</span></span>
+        </div>
+      </div>
+      <div class="img-container" style="margin-top: 1rem;">
+        <div><strong>✨ Converted preview</strong></div>
+        <img id="convertedPreview" class="preview-img" alt="converted preview" style="background:#fef5e7;">
+        <div class="info-text">📦 Output size: <span id="outputSizeInfo">—</span> &nbsp;|&nbsp; 🎯 Format: <span id="outputFormatLabel">—</span></div>
+        <div id="sizeReductionNote" style="font-size:0.7rem; color:#3c6e5f;"></div>
+      </div>
+    </div>
+  </div>
+  <footer>✔️ Supports JPG, PNG, WebP, GIF, BMP, SVG. Shows DPI. Target size mode: JPEG/WebP use binary search on quality; PNG uses lossy color posterization to meet target size.</footer>
+</div>
+
+<script>
+  (function() {
+    // DOM elements
+    const fileInput = document.getElementById('fileInput');
+    const outputFormatSelect = document.getElementById('outputFormat');
+    const scalePercentInput = document.getElementById('scalePercent');
+    const targetWidthInput = document.getElementById('targetWidth');
+    const targetHeightInput = document.getElementById('targetHeight');
+    const keepAspectCheck = document.getElementById('keepAspect');
+    const targetSizeValue = document.getElementById('targetSizeValue');
+    const targetSizeUnit = document.getElementById('targetSizeUnit');
+    const convertBtn = document.getElementById('convertBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const originalPreview = document.getElementById('originalPreview');
+    const convertedPreview = document.getElementById('convertedPreview');
+    const originalSizeSpan = document.getElementById('originalSize');
+    const origDimensionsSpan = document.getElementById('origDimensions');
+    const origDPISpan = document.getElementById('origDPI');
+    const outputSizeInfoSpan = document.getElementById('outputSizeInfo');
+    const outputFormatLabelSpan = document.getElementById('outputFormatLabel');
+    const statusMsgDiv = document.getElementById('statusMsg');
+    const sizeReductionNote = document.getElementById('sizeReductionNote');
+    const targetSizeNote = document.getElementById('targetSizeNote');
+
+    const percentPanel = document.getElementById('percentPanel');
+    const dimensionPanel = document.getElementById('dimensionPanel');
+    const noResizeText = document.getElementById('noResizeText');
+
+    let currentMode = 'noresize';
+    const modeBtns = document.querySelectorAll('.mode-btn');
+    let originalImageFile = null;
+    let originalImgData = null;
+    let originalWidth = 0, originalHeight = 0;
+    let originalDPIInfo = { x: null, y: null, unit: '' };
+    let convertedBlob = null;
+    let currentOutputFormat = 'image/jpeg';
+
+    // ------------------------------------------------------------------
+    // DPI extraction (unchanged)
+    async function extractDPIFromFile(file) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const buffer = e.target.result;
+          const uint8 = new Uint8Array(buffer);
+          if (uint8.length > 8) {
+            if (uint8[0] === 0xFF && uint8[1] === 0xD8) {
+              let dpi = parseJPEGDPI(uint8);
+              resolve(dpi);
+              return;
+            }
+            if (uint8[0] === 0x89 && uint8[1] === 0x50 && uint8[2] === 0x4E && uint8[3] === 0x47) {
+              let dpi = parsePNGDPI(uint8);
+              resolve(dpi);
+              return;
+            }
+          }
+          resolve({ x: null, y: null, unit: 'unknown' });
+        };
+        reader.onerror = () => resolve({ x: null, y: null, unit: 'unknown' });
+        reader.readAsArrayBuffer(file.slice(0, 15000));
+      });
+    }
+
+    function parseJPEGDPI(data) {
+      let idx = 2;
+      let foundDensity = { x: null, y: null, unit: '' };
+      while (idx < data.length - 3) {
+        if (data[idx] === 0xFF) {
+          const marker = data[idx + 1];
+          if (marker === 0xE0) {
+            const length = (data[idx + 2] << 8) | data[idx + 3];
+            if (length >= 14 && idx + length < data.length) {
+              if (data[idx + 4] === 0x4A && data[idx + 5] === 0x46 && data[idx + 6] === 0x49 && data[idx + 7] === 0x46 && data[idx + 8] === 0x00) {
+                const densityUnit = data[idx + 11];
+                const xDensity = (data[idx + 12] << 8) | data[idx + 13];
+                const yDensity = (data[idx + 14] << 8) | data[idx + 15];
+                let unitStr = '';
+                if (densityUnit === 1) unitStr = 'DPI';
+                else if (densityUnit === 2) unitStr = 'DPC';
+                else unitStr = 'aspect';
+                foundDensity = { x: xDensity, y: yDensity, unit: unitStr };
+                break;
+              }
+            }
+            idx += length + 2;
+            continue;
+          } 
+          else if (marker === 0xE1) {
+            const length = (data[idx + 2] << 8) | data[idx + 3];
+            if (idx + length < data.length && length > 8) {
+              if (data[idx + 4] === 0x45 && data[idx + 5] === 0x78 && data[idx + 6] === 0x69 && data[idx + 7] === 0x66 && data[idx + 8] === 0x00 && data[idx + 9] === 0x00) {
+                const exifData = data.slice(idx + 10, idx + length);
+                const exifDPI = parseEXIFforDPI(exifData);
+                if (exifDPI.x && exifDPI.y) {
+                  foundDensity = exifDPI;
+                  break;
+                }
+              }
+            }
+            idx += length + 2;
+            continue;
+          }
+          else {
+            const skipLen = (data[idx + 2] << 8) | data[idx + 3];
+            if (skipLen > 0) idx += skipLen + 2;
+            else idx += 2;
+          }
+        } else {
+          idx++;
+        }
+        if (idx > data.length - 20) break;
+      }
+      if (!foundDensity.x && !foundDensity.y) return { x: null, y: null, unit: 'unknown' };
+      return foundDensity;
+    }
+
+    function parseEXIFforDPI(exifSegment) {
+      try {
+        let littleEndian = true;
+        if (exifSegment[0] === 0x49 && exifSegment[1] === 0x49) littleEndian = true;
+        else if (exifSegment[0] === 0x4D && exifSegment[1] === 0x4D) littleEndian = false;
+        else return { x: null, y: null, unit: '' };
+        
+        const getUint16 = (offset) => littleEndian ? (exifSegment[offset] | (exifSegment[offset+1] << 8)) : ((exifSegment[offset] << 8) | exifSegment[offset+1]);
+        const getUint32 = (offset) => {
+          if (littleEndian) return exifSegment[offset] | (exifSegment[offset+1] << 8) | (exifSegment[offset+2] << 16) | (exifSegment[offset+3] << 24);
+          return (exifSegment[offset] << 24) | (exifSegment[offset+1] << 16) | (exifSegment[offset+2] << 8) | exifSegment[offset+3];
+        };
+        
+        let ifdOffset = getUint32(4);
+        if (ifdOffset + 2 > exifSegment.length) return {};
+        let numEntries = getUint16(ifdOffset);
+        let entryOffset = ifdOffset + 2;
+        let xres = null, yres = null;
+        for (let i = 0; i < numEntries; i++) {
+          let tag = getUint16(entryOffset + i*12);
+          if (tag === 0x011A) {
+            let valueOffset = getUint32(entryOffset + i*12 + 8);
+            if (valueOffset + 8 <= exifSegment.length) {
+              let num = getUint32(valueOffset);
+              let denom = getUint32(valueOffset + 4);
+              if (denom !== 0) xres = num / denom;
+            }
+          }
+          if (tag === 0x011B) {
+            let valueOffset = getUint32(entryOffset + i*12 + 8);
+            if (valueOffset + 8 <= exifSegment.length) {
+              let num = getUint32(valueOffset);
+              let denom = getUint32(valueOffset + 4);
+              if (denom !== 0) yres = num / denom;
+            }
+          }
+        }
+        if (xres && yres) return { x: Math.round(xres), y: Math.round(yres), unit: 'DPI' };
+      } catch(e) {}
+      return { x: null, y: null, unit: '' };
+    }
+
+    function parsePNGDPI(data) {
+      let idx = 8;
+      while (idx + 12 <= data.length) {
+        const chunkLen = (data[idx] << 24) | (data[idx+1] << 16) | (data[idx+2] << 8) | data[idx+3];
+        const chunkType = String.fromCharCode(data[idx+4], data[idx+5], data[idx+6], data[idx+7]);
+        if (chunkType === 'pHYs') {
+          if (chunkLen >= 9) {
+            const ppuX = (data[idx+8] << 24) | (data[idx+9] << 16) | (data[idx+10] << 8) | data[idx+11];
+            const ppuY = (data[idx+12] << 24) | (data[idx+13] << 16) | (data[idx+14] << 8) | data[idx+15];
+            const unitSpec = data[idx+16];
+            if (unitSpec === 1 && ppuX > 0 && ppuY > 0) {
+              let dpiX = Math.round(ppuX * 0.0254);
+              let dpiY = Math.round(ppuY * 0.0254);
+              return { x: dpiX, y: dpiY, unit: 'DPI' };
+            } else if (ppuX === ppuY && ppuX > 0) {
+              return { x: Math.round(ppuX * 0.0254), y: Math.round(ppuY * 0.0254), unit: 'DPI (est)' };
+            }
+          }
+          break;
+        }
+        idx += 12 + chunkLen;
+        if (idx >= data.length - 4) break;
+      }
+      return { x: null, y: null, unit: 'unknown' };
+    }
+
+    function formatDPI(dpiObj) {
+      if (dpiObj.x && dpiObj.y) {
+        if (dpiObj.x === dpiObj.y) return `${dpiObj.x} ${dpiObj.unit || 'DPI'}`;
+        else return `${dpiObj.x} x ${dpiObj.y} ${dpiObj.unit || 'DPI'}`;
+      }
+      return '❓ Not embedded';
+    }
+
+    function formatBytes(bytes, decimals = 2) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const dm = decimals < 0 ? 0 : decimals;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    // Mode switching
+    function setMode(mode) {
+      currentMode = mode;
+      modeBtns.forEach(btn => {
+        if (btn.getAttribute('data-mode') === mode) btn.classList.add('active');
+        else btn.classList.remove('active');
+      });
+      percentPanel.style.display = 'none';
+      dimensionPanel.style.display = 'none';
+      noResizeText.style.display = 'none';
+      if (mode === 'percent') percentPanel.style.display = 'block';
+      else if (mode === 'dimension') dimensionPanel.style.display = 'block';
+      else if (mode === 'noresize') noResizeText.style.display = 'block';
+      else if (mode === 'targetsize') {
+        targetSizeNote.innerText = '🎯 Target size mode ACTIVE: JPEG/WebP = quality adjusted; PNG = lossy color reduction (posterization) to meet target.';
+      }
+      if (mode !== 'targetsize') {
+        targetSizeNote.innerText = '💡 Target size is IGNORED in this mode. Switch to "Target size (auto-quality)" to use it.';
+      }
+    }
+
+    modeBtns.forEach(btn => {
+      btn.addEventListener('click', () => setMode(btn.getAttribute('data-mode')));
+    });
+
+    function updateDimensionFromWidth() {
+      if (keepAspectCheck.checked && originalWidth && originalHeight && currentMode === 'dimension') {
+        let w = parseInt(targetWidthInput.value);
+        if (!isNaN(w) && w > 0) {
+          let newH = Math.round(w * (originalHeight / originalWidth));
+          targetHeightInput.value = newH;
+        }
+      }
+    }
+    targetWidthInput.addEventListener('input', updateDimensionFromWidth);
+
+    async function loadImageWithMetadata(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = async () => {
+            originalWidth = img.width;
+            originalHeight = img.height;
+            originalImgData = img;
+            originalPreview.src = e.target.result;
+            originalSizeSpan.textContent = formatBytes(file.size);
+            origDimensionsSpan.textContent = `${originalWidth} × ${originalHeight} px`;
+            const dpiData = await extractDPIFromFile(file);
+            originalDPIInfo = dpiData;
+            origDPISpan.textContent = formatDPI(dpiData);
+            originalImageFile = file;
+            if (!targetWidthInput.value) targetWidthInput.value = originalWidth;
+            if (!targetHeightInput.value) targetHeightInput.value = originalHeight;
+            resolve(img);
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function computeResizedDimensions(imgW, imgH) {
+      if (currentMode === 'noresize') return { width: imgW, height: imgH };
+      if (currentMode === 'percent') {
+        let percent = parseFloat(scalePercentInput.value);
+        if (isNaN(percent)) percent = 100;
+        percent = Math.min(Math.max(percent, 10), 300);
+        return { width: Math.max(1, Math.round(imgW * percent / 100)), height: Math.max(1, Math.round(imgH * percent / 100)) };
+      }
+      if (currentMode === 'dimension') {
+        let targetW = parseInt(targetWidthInput.value, 10);
+        let targetH = parseInt(targetHeightInput.value, 10);
+        let keepAspect = keepAspectCheck.checked;
+        if (isNaN(targetW) && isNaN(targetH)) return { width: imgW, height: imgH };
+        if (keepAspect) {
+          if (!isNaN(targetW) && targetW > 0) {
+            let ratio = imgH / imgW;
+            return { width: targetW, height: Math.max(1, Math.round(targetW * ratio)) };
+          } else if (!isNaN(targetH) && targetH > 0) {
+            let ratio = imgW / imgH;
+            return { width: Math.max(1, Math.round(targetH * ratio)), height: targetH };
+          }
+        }
+        let finalW = (!isNaN(targetW) && targetW > 0) ? targetW : imgW;
+        let finalH = (!isNaN(targetH) && targetH > 0) ? targetH : imgH;
+        return { width: Math.max(1, finalW), height: Math.max(1, finalH) };
+      }
+      return { width: imgW, height: imgH };
+    }
+
+    // Lossy PNG compression: posterization (reduce bits per channel) to shrink file size
+    async function compressPNGToTarget(canvas, targetBytes) {
+      return new Promise(async (resolve) => {
+        // Try full quality first
+        let fullBlob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+        if (fullBlob.size <= targetBytes) {
+          resolve(fullBlob);
+          return;
+        }
+        
+        // Try reducing color depth: bits per channel from 8 down to 2
+        const bitsLevels = [6, 5, 4, 3, 2]; // 8 -> 6 -> 5 -> 4 -> 3 -> 2 bits
+        let bestBlob = fullBlob;
+        let bestSize = fullBlob.size;
+        
+        const width = canvas.width;
+        const height = canvas.height;
+        const ctx = canvas.getContext('2d');
+        const originalImageData = ctx.getImageData(0, 0, width, height);
+        
+        for (let bits of bitsLevels) {
+          const steps = Math.pow(2, bits);
+          const step = 256 / steps;
+          // Create a new ImageData with quantized colors
+          const newData = new ImageData(width, height);
+          const srcPixels = originalImageData.data;
+          const dstPixels = newData.data;
+          for (let i = 0; i < srcPixels.length; i += 4) {
+            dstPixels[i] = Math.floor(srcPixels[i] / step) * step;     // R
+            dstPixels[i+1] = Math.floor(srcPixels[i+1] / step) * step; // G
+            dstPixels[i+2] = Math.floor(srcPixels[i+2] / step) * step; // B
+            dstPixels[i+3] = srcPixels[i+3]; // keep alpha
+          }
+          // Put quantized image on canvas
+          ctx.putImageData(newData, 0, 0);
+          const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+          if (blob.size < bestSize) {
+            bestBlob = blob;
+            bestSize = blob.size;
+          }
+          if (bestSize <= targetBytes) break;
+        }
+        
+        // Restore original canvas? Not needed because we recreate canvas each conversion.
+        // But we modified canvas, so we should restore original content for further attempts? Not needed because we use a fresh canvas each convert call.
+        resolve(bestBlob);
+      });
+    }
+
+    async function getBlobWithTargetSize(canvas, mimeType, targetBytes) {
+      if (mimeType === 'image/jpeg' || mimeType === 'image/webp') {
+        return new Promise((resolve) => {
+          const tryQuality = (quality) => new Promise(res => canvas.toBlob(res, mimeType, quality));
+          const minQuality = 0.05;
+          let bestBlob = null;
+          let bestSize = Infinity;
+
+          const updateBest = (blob) => {
+            if (blob && blob.size < bestSize) {
+              bestBlob = blob;
+              bestSize = blob.size;
+            }
+          };
+
+          (async () => {
+            let lowBlob = await tryQuality(minQuality);
+            updateBest(lowBlob);
+            if (lowBlob && lowBlob.size <= targetBytes) {
+              resolve(lowBlob);
+              return;
+            }
+
+            let lowQ = minQuality, highQ = 0.98;
+            for (let i = 0; i < 14; i++) {
+              let mid = (lowQ + highQ) / 2;
+              let blob = await tryQuality(mid);
+              updateBest(blob);
+              if (blob.size <= targetBytes) lowQ = mid;
+              else highQ = mid;
+              if (highQ - lowQ < 0.02) break;
+            }
+            if (bestBlob) {
+              if (bestBlob.size > targetBytes) {
+                statusMsgDiv.innerHTML += ` ⚠️ Even lowest quality (${Math.round(minQuality*100)}%) gives ${formatBytes(bestBlob.size)} > target. Consider resizing first.`;
+              }
+              resolve(bestBlob);
+            } else {
+              resolve(await tryQuality(minQuality));
+            }
+          })();
+        });
+      } 
+      else if (mimeType === 'image/png') {
+        // Use lossy PNG preprocessing
+        return await compressPNGToTarget(canvas, targetBytes);
+      }
+      else {
+        // fallback for other formats
+        return new Promise(res => canvas.toBlob(res, mimeType));
+      }
+    }
+
+    async function convertImage() {
+      if (!originalImgData) {
+        statusMsgDiv.innerText = '⚠️ Please select an image first.';
+        return;
+      }
+      statusMsgDiv.innerText = '⏳ Processing image...';
+      downloadBtn.disabled = true;
+      
+      try {
+        const img = originalImgData;
+        const mimeType = outputFormatSelect.value;
+        currentOutputFormat = mimeType;
+        outputFormatLabelSpan.textContent = mimeType.split('/')[1].toUpperCase();
+        
+        const isTargetSizeMode = (currentMode === 'targetsize');
+        let targetW, targetH;
+        let useTargetSize = false;
+        let targetBytes = null;
+
+        if (isTargetSizeMode) {
+          targetW = img.width;
+          targetH = img.height;
+          let targetSizeRaw = parseFloat(targetSizeValue.value);
+          if (!isNaN(targetSizeRaw) && targetSizeRaw > 0) {
+            const unit = targetSizeUnit.value;
+            targetBytes = unit === 'KB' ? targetSizeRaw * 1024 : targetSizeRaw * 1024 * 1024;
+            useTargetSize = true;
+          } else {
+            statusMsgDiv.innerText = '⚠️ Target size mode active but no valid size entered. Using default quality.';
+          }
+        } else {
+          let dims = computeResizedDimensions(img.width, img.height);
+          targetW = dims.width;
+          targetH = dims.height;
+        }
+
+        targetW = Math.floor(Math.max(1, targetW));
+        targetH = Math.floor(Math.max(1, targetH));
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        
+        let outputBlob;
+        if (useTargetSize) {
+          statusMsgDiv.innerText = `🎯 Targeting ≤ ${formatBytes(targetBytes)} ...`;
+          outputBlob = await getBlobWithTargetSize(canvas, mimeType, targetBytes);
+          let success = outputBlob.size <= targetBytes;
+          let method = (mimeType === 'image/png') ? ' (lossy color reduction)' : ' (quality adjustment)';
+          statusMsgDiv.innerHTML = `🎯 Target ${formatBytes(targetBytes)} → final ${formatBytes(outputBlob.size)}${method} ${success ? '✅' : '❌ Target not reached, try resizing first.'}`;
+        } else {
+          // high quality default for resize modes
+          if (mimeType === 'image/jpeg') outputBlob = await new Promise(res => canvas.toBlob(res, mimeType, 0.92));
+          else if (mimeType === 'image/webp') outputBlob = await new Promise(res => canvas.toBlob(res, mimeType, 0.9));
+          else outputBlob = await new Promise(res => canvas.toBlob(res, mimeType));
+          statusMsgDiv.innerHTML = isTargetSizeMode ? '✅ Conversion done (target not used because no size entered).' : '✅ Conversion done (resize mode, high quality).';
+        }
+        
+        convertedBlob = outputBlob;
+        const outputURL = URL.createObjectURL(outputBlob);
+        convertedPreview.src = outputURL;
+        convertedPreview.onload = () => URL.revokeObjectURL(outputURL);
+        outputSizeInfoSpan.textContent = formatBytes(outputBlob.size);
+        
+        if (originalImageFile) {
+          let diffPercent = ((originalImageFile.size - outputBlob.size) / originalImageFile.size * 100).toFixed(1);
+          if (outputBlob.size < originalImageFile.size) sizeReductionNote.innerText = `📉 ${diffPercent}% smaller than original`;
+          else sizeReductionNote.innerText = `📈 Size increase vs original (format/resize)`;
+        }
+        downloadBtn.disabled = false;
+      } catch (err) {
+        statusMsgDiv.innerText = '❌ Error: ' + err.message;
+        console.error(err);
+      }
+    }
+    
+    downloadBtn.addEventListener('click', () => {
+      if (!convertedBlob) return;
+      let ext = currentOutputFormat === 'image/jpeg' ? 'jpg' : (currentOutputFormat === 'image/png' ? 'png' : 'webp');
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(convertedBlob);
+      link.href = url;
+      link.download = `converted.${ext}`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    });
+    
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      try {
+        await loadImageWithMetadata(file);
+        statusMsgDiv.innerHTML = '✅ Image loaded. DPI & metadata shown. Choose mode and convert.';
+        convertedBlob = null;
+        downloadBtn.disabled = true;
+        sizeReductionNote.innerText = '';
+        outputSizeInfoSpan.textContent = '—';
+        convertedPreview.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="150"%3E%3Crect width="200" height="150" fill="%23eef2f5"/%3E%3Ctext x="30" y="80" fill="%23899"%3Eready to convert%3C/text%3E%3C/svg%3E';
+      } catch(err) {
+        statusMsgDiv.innerText = 'Error loading image';
+      }
+    });
+    
+    convertBtn.addEventListener('click', convertImage);
+    setMode('noresize');
+  })();
+</script>
+</body>
+</html>
